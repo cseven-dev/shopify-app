@@ -80,56 +80,118 @@ class SettingsController extends Controller
         return back()->with('success', 'Settings updated.');
     }
 
-    public function createClient()
+    public function createClient(Request $request)
     {
-        $settings = Setting::firstOrCreate([]);
+        try {
 
-        //dd($settings->email);
+        //dd( $request->input('email') );
 
-        $email = $settings->email;
+            $settings = Setting::firstOrCreate([]);
+            // Ensure we always have a saved email
+            if ($request->has('email')) {
+                // Setting::updateOrCreate(['id' => 1], [ // or your settings key
+                //     'email' => $request->input('email')
+                // ]);
+                 $settings->update($request->only('email'));
+            }
 
-        if (!$email) {
-            return back()->with('error', 'Email is required before creating a client.');
+
+             //return back()->with('error', $request->input('email'));
+
+
+
+            $email = $settings->email;
+
+            if (!$email) {
+                return back()->with('error', 'Email is required before creating a client.');
+            }
+
+            $response = Http::retry(3, 1000)
+                ->timeout(30)
+                ->withHeaders([
+                    'Content-Type' => 'application/json',
+                    'Accept' => 'application/json',
+                ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
+                    'email' => $email
+                ]);
+
+            // Check if response was successful
+            if ($response->successful()) {
+                $responseData = $response->json();
+
+                if (isset($responseData['data']['API_KEY'])) {
+                    $settings->api_key = $responseData['data']['API_KEY'];
+                    $settings->save();
+
+                    return back()->with('success', 'Client created and API key saved.');
+                }
+
+                // If no API key but has error message
+                if (isset($responseData['error'])) {
+                    return back()->with('error', 'Error: ' . $responseData['error']);
+                }
+            }
+
+            // If response failed
+            return back()->with('error', 'Failed to create client. HTTP Status: ' . $response->status());
+        } catch (\Exception $e) {
+            return back()->with('error', 'Exception: ' . $e->getMessage());
         }
-
-        // $response = Http::withHeaders([
-        //     'Content-Type' => 'application/json',
-        //     'Accept' => 'application/json',
-        // ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
-        //     'email' => $email
-        // ]);
-
-        $response = Http::retry(3, 1000) // Retry 3 times with 1 second delay
-            ->timeout(3600) // 30 second timeout
-            ->withHeaders([
-                'Content-Type' => 'application/json',
-                'Accept' => 'application/json',
-            ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
-                'email' => $email
-            ]);
-
-        //echo '<pre>'; // Debugging line to see the response
-        //print_r($response->json()); // Print the response for debugging
-        //echo '</pre>';
-
-        //debug($response->json()); // Debugging line to see the response
-
-        //dd($response->json());
-
-        if ($response->successful() && isset($response['data']['API_KEY'])) {
-            $settings->api_key = $response['data']['API_KEY'];
-            $settings->save();
-
-            return back()->with('success', 'Client created and API key saved.');
-        }
-
-        // If the response has an error, handle it
-        if (isset($response['error'])) {
-            return back()->with('error', 'Error: ' . $response['error']);
-        }
-
-        return back()->with('error', 'Failed to create client.');
     }
+
+    // public function createClient()
+    // {
+
+    //     //return back()->with('error', 'Email is required before creating a client.');
+
+    //     $settings = Setting::firstOrCreate([]);
+
+    //     //dd($settings->email);
+
+    //     $email = $settings->email;
+
+    //     if (!$email) {
+    //         return back()->with('error', 'Email is required before creating a client.');
+    //     }
+
+    //     // $response = Http::withHeaders([
+    //     //     'Content-Type' => 'application/json',
+    //     //     'Accept' => 'application/json',
+    //     // ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
+    //     //     'email' => $email
+    //     // ]);
+
+    //     $response = Http::retry(3, 1000) // Retry 3 times with 1 second delay
+    //         ->timeout(3600) // 30 second timeout
+    //         ->withHeaders([
+    //             'Content-Type' => 'application/json',
+    //             'Accept' => 'application/json',
+    //         ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
+    //             'email' => $email
+    //         ]);
+
+    //     //echo '<pre>'; // Debugging line to see the response
+    //     //print_r($response->json()); // Print the response for debugging
+    //     //echo '</pre>';
+
+    //     //debug($response->json()); // Debugging line to see the response
+
+    //     //dd($response->json());
+
+    //     if ($response->successful() && isset($response['data']['API_KEY'])) {
+    //         $settings->api_key = $response['data']['API_KEY'];
+    //         $settings->save();
+
+    //         return back()->with('success', 'Client created and API key saved.');
+    //     }
+
+    //     // If the response has an error, handle it
+    //     if (isset($response['error'])) {
+    //         return back()->with('error', 'Error: ' . $response['error']);
+    //     }
+
+    //     return back()->with('error', 'Failed to create client.');
+    // }
 
     public function deleteClient()
     {
@@ -161,6 +223,7 @@ class SettingsController extends Controller
                         'api_key' => null,
                         'token' => null,
                         'token_expiry' => null,
+                        'email' => null
                     ]);
 
                     return back()->with('success', $body['message'] ?? 'Client deleted successfully.');

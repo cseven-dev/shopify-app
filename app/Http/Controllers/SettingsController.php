@@ -1596,9 +1596,9 @@ class SettingsController extends Controller
         foreach ($products as $product) {
 
 
-            if (empty($product['collectionDocs'])) {
-                continue; // Skip products without collectionDocs
-            }
+            //if (empty($product['collectionDocs'])) {
+                //continue; // Skip products without collectionDocs
+           // }
 
             // if (isset($product['consignment']['title']) && !empty($product['consignment']['title'])) {
             //     error_log('Consignment Product: ' . $product['consignment']['title']);

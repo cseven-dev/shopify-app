@@ -73,7 +73,7 @@ use App\Http\Controllers\SettingsController;
 // Route::get('/', function () {
 //     return view('welcome');
 // });
-Route::get('/', [SettingsController::class, 'index'])->name('settings');
+
 
 // Route::get('/dashboard', function () {
 //     return view('dashboard');
@@ -85,19 +85,25 @@ Route::get('/', [SettingsController::class, 'index'])->name('settings');
 //     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 // });
 
-//Route::middleware(['auth'])->group(function () {
-Route::get('/settings', [SettingsController::class, 'index'])->name('settings');
-Route::post('/settings/update', [SettingsController::class, 'update'])->name('settings.update');
-Route::post('/settings/create-client', [SettingsController::class, 'createClient'])->name('settings.createClient');
-Route::post('/settings/delete-client', [SettingsController::class, 'deleteClient'])->name('settings.deleteClient');
-Route::post('/settings/import-products', [SettingsController::class, 'importProducts'])->name('settings.importProducts');
+Route::middleware(['web', 'allow.shopify.iframe'])->group(function () {
+    Route::get('/settings', [SettingsController::class, 'index'])->name('settings');
+    Route::post('/settings/update', [SettingsController::class, 'update'])->name('settings.update');
+    Route::post('/settings/create-client', [SettingsController::class, 'createClient'])->name('settings.createClient');
+    Route::post('/settings/delete-client', [SettingsController::class, 'deleteClient'])->name('settings.deleteClient');
+    Route::post('/settings/import-products', [SettingsController::class, 'importProducts'])->name('settings.importProducts');
+    Route::post('/settings/shopify-credentials', [SettingsController::class, 'saveShopifyCredentials'])->name('settings.saveShopifyCredentials');
+    Route::post('/settings/verify-token', [SettingsController::class, 'verifyToken'])->name('settings.verifyToken');
 
-// new work
+    Route::get('/', [SettingsController::class, 'index'])->name('settings');
+    Route::get('/import-products', [SettingsController::class, 'importProducts'])->name('import.products');
+    Route::get('/import-logs', [SettingsController::class, 'showImportLogs'])->name('import.logs');
+});
+// New work
 //Route::post('/import-products', [SettingsController::class, 'importProducts'])->name('import.products');
 //Route::post('/import-products', [SettingsController::class, 'importProducts'])->name('import.products');
 //Route::match(['get', 'post'], '/import-products', [SettingsController::class, 'importProducts'])->name('import.products');
-Route::get('/import-products', [SettingsController::class, 'importProducts'])->name('import.products');
-Route::get('/import-logs', [SettingsController::class, 'showImportLogs'])->name('import.logs');
+
+
 //});
 // routes/web.php
 // Route::middleware(['allow.shopify.iframe'])->group(function () {

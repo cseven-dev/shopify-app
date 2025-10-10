@@ -12,7 +12,15 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        // $schedule->command('inspire')->hourly();
+         // Run daily import at midnight (for testing, you can use everyMinute())
+        // $schedule->command('import:daily')
+        //          ->dailyAt('00:00') // Midnight
+        //          ->timezone('America/New_York') // Adjust to your timezone
+        //          ->description('Test daily product import')
+        //          ->appendOutputTo(storage_path('logs/scheduler-output.log'));
+
+        // For testing, you can use this to run every minute:
+         $schedule->command('import:daily')->everyMinute();
     }
 
     /**

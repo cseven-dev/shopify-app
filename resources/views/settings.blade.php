@@ -32,6 +32,54 @@ $settings = \App\Models\Setting::first();
     </div>
     @endif
 
+    {{-- Shopify API Credentials --}}
+    @if(!$isVerified)
+    <div class="bg-white shadow rounded-lg p-6 space-y-6">
+        <h3 class="text-lg font-semibold text-gray-800">Shopify API Credentials</h3>
+
+        <form method="POST" action="{{ route('settings.saveShopifyCredentials') }}" class="space-y-4">
+            @csrf
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Shopify Store URL</label>
+                <input type="text"
+                    name="shopify_store_url"
+                    value="{{ old('shopify_store_url', $settings->shopify_store_url ?? '') }}"
+                    placeholder="e.g. yourstore.myshopify.com"
+                    class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                    required>
+                <p class="mt-1 text-xs text-gray-500">Enter your full Shopify store URL.</p>
+                @error('shopify_store_url')
+                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                @enderror
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Admin API Access Token</label>
+                <input type="password"
+                    name="shopify_token"
+                    value="{{ old('shopify_token', $settings->shopify_token ?? '') }}"
+                    placeholder="shpat_xxxxxxxxxxxxxxxxxx"
+                    class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                    required>
+                <p class="mt-1 text-xs text-gray-500">Enter your private Admin API Access Token.</p>
+                @error('shopify_token')
+                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                @enderror
+            </div>
+            <div class="flex items-center justify-between">
+                <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                    Validate & Save
+                </button>
+                <div class="relative inline-block group">
+                    <span class="text-gray-500 text-sm cursor-help">ℹ️</span>
+                    <div class="absolute left-1/2 -translate-x-1/2 mt-2 w-64 px-3 py-2 text-sm text-white bg-gray-800 rounded shadow-lg opacity-0 group-hover:opacity-100 transition pointer-events-none z-10">
+                        We’ll make a test request to Shopify Admin API to ensure the credentials are valid before saving.
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+    @else
     {{-- Card 1: Client & Email --}}
     <div class="bg-white shadow rounded-lg p-6 space-y-6">
         <h3 class="text-lg font-semibold text-gray-800">Client & Email</h3>
@@ -45,8 +93,8 @@ $settings = \App\Models\Setting::first();
                     name="email"
                     value="{{ old('email', $settings->email ?? '') }}"
                     class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 
-                    @if($settings->api_key) bg-gray-100 cursor-not-allowed @endif"
-                    @if($settings->api_key) disabled @endif
+                    @if($settings?->api_key) bg-gray-100 cursor-not-allowed @endif"
+                    @if($settings?->api_key) disabled @endif
                 required>
                 <p class="mt-1 text-xs text-gray-500">Please add the email address before creating the client.</p>
             </div>
@@ -55,7 +103,7 @@ $settings = \App\Models\Setting::first();
 
                 <button type="submit"
                     class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded mt-1"
-                    @if($settings->api_key) disabled @endif>
+                    @if($settings?->api_key) disabled @endif>
                     Create Client
                 </button>
                 <!-- Tooltip -->
@@ -70,17 +118,15 @@ $settings = \App\Models\Setting::first();
             @csrf
             <button type="submit"
                 class="w-full bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded"
-                @if(!$settings->api_key) disabled @endif>
+                @if(!$settings?->api_key) disabled @endif>
                 Delete Client
             </button>
             <p class="mt-1 text-xs text-gray-500">This will remove the client and all the associated data like APIKey Token.</p>
         </form>
     </div>
 
-
-
     {{-- Show these cards ONLY if client is created --}}
-    @if($settings->api_key)
+    @if($settings?->api_key)
     {{-- Card 2: Product Settings --}}
     <div class="bg-white shadow rounded-lg p-6 space-y-4">
         <h3 class="text-lg font-semibold text-gray-800 mb-4">Product Settings</h3>
@@ -118,7 +164,6 @@ $settings = \App\Models\Setting::first();
             data-url="{{ route('import.products') }}">
             Import Products
         </button>
-
         <!-- Progress and Logs -->
         <div id="progress-wrapper" class="mt-6 space-y-4">
             <div id="progress-container" class="bg-white border rounded p-4 shadow hidden">
@@ -129,7 +174,6 @@ $settings = \App\Models\Setting::first();
                         style="width: 0%">0%</div>
                 </div>
             </div>
-
             <div id="import-logs" class="bg-white border rounded p-4 shadow hidden">
                 <h3 class="text-lg font-semibold text-gray-900 mb-3">📋 Import Logs</h3>
                 <ul id="log-list" class="space-y-2 max-h-80 overflow-y-auto pr-2">
@@ -138,7 +182,7 @@ $settings = \App\Models\Setting::first();
             </div>
         </div>
     </div>
-    @endif
-
+    @endif {{-- End if client created --}}
+    @endif {{-- End if verified --}}
 </div>
 @endsection

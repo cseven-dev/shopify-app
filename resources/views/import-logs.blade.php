@@ -6,7 +6,7 @@
         <div class="p-6 bg-white border-b border-gray-200">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-2xl font-bold">Import Logs</h2>
-                <a href="{{ url('/') }}"
+                <a href="{{ route('settings', ['shop' => session('shop'), 'host' => session('host')]) }}"
                     class="inline-flex items-center px-3 py-1.5 text-sm font-medium text-gray-600 bg-gray-100 rounded hover:bg-gray-200 transition">
                     ← Home
                 </a>
@@ -22,7 +22,7 @@
                             <li>
                                 <a href="{{ route('import.logs', ['log' => $logFile]) }}"
                                     class="block px-3 py-2 rounded {{ $selectedLog === $logFile ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100' }}">
-                                    {{ \Carbon\Carbon::createFromFormat('Y-m-d_H-i-s', str_replace(['import_log_', '.log'], '', $logFile))->format('M d, Y H:i') }}
+                                    {{ \Carbon\Carbon::createFromFormat('Y-m-d_H-i-s', str_replace(['import_cron_log_','import_log_', '.log'], '', $logFile))->format('M d, Y H:i') }}
                                 </a>
                             </li>
                             @empty

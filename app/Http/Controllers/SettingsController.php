@@ -773,9 +773,17 @@ class SettingsController extends Controller
                 $variants[] = $variantData;
             }
 
+
+            $updatedTitle = $product['title'] . ' #' . $product['ID'];
+
+            if (isset($size) && $size != '') {
+                $updatedTitle = $size . ' ' . $updatedTitle;
+            }
+
+
             $shopifyProduct = [
                 "product" => [
-                    'title' => $product['title'] ?? 'No Title',
+                    'title' => $updatedTitle ?? 'No Title',
                     'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
                     'vendor' => 'Oriental Rug Mart',
                     'category' => 'Home & Garden > Decor > Rug',

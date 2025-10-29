@@ -1,18 +1,17 @@
 @php
-$settings = \App\Models\Setting::first();
+//$settings = \App\Models\Setting::first();
 @endphp
 
 @extends('layouts.app')
 
 @section('content')
 <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-
     <div class="flex items-center justify-between mb-6">
         <h2 class="text-2xl font-bold text-gray-800">
             Application Settings
         </h2>
         <x-nav-link
-            :href="route('import.logs')"
+            :href="route('import.logs', ['shop' => optional($settings)->shopify_store_url ?? session('shop')])"
             :active="request()->routeIs('import.logs')"
             class="inline-flex items-center px-4 py-2 text-sm font-semibold text-black hover:text-blue-700 transition">
             {{ __('View Full Logs') }}
@@ -96,6 +95,9 @@ $settings = \App\Models\Setting::first();
                     @if($settings?->api_key) bg-gray-100 cursor-not-allowed @endif"
                     @if($settings?->api_key) disabled @endif
                 required>
+                <input type="hidden"
+                    name="shop"
+                    value="{{ $shop }}">
                 <p class="mt-1 text-xs text-gray-500">Please add the email address before creating the client.</p>
             </div>
 
@@ -116,6 +118,7 @@ $settings = \App\Models\Setting::first();
         {{-- Delete Client --}}
         <form method="POST" action="{{ route('settings.deleteClient') }}">
             @csrf
+            <input type="hidden" name="shop" value="{{ $shop }}">
             <button type="submit"
                 class="w-full bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded"
                 @if(!$settings?->api_key) disabled @endif>
@@ -140,15 +143,12 @@ $settings = \App\Models\Setting::first();
                     value="{{ old('product_limit', $settings->product_limit ?? 10) }}"
                     class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             </div>
-
             <div>
                 <label class="block text-sm font-medium text-gray-700">Product Skip</label>
-                <input type="number"
-                    name="product_skip"
-                    value="{{ old('product_skip', $settings->product_skip ?? 0) }}"
+                <input type="number" name="product_skip" value="{{ old('product_skip', $settings->product_skip ?? 0) }}"
                     class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
             </div>
-
+            <input type="hidden" name="shop" value="{{ $shop }}">
             <button type="submit"
                 class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">
                 Save Settings
@@ -156,12 +156,25 @@ $settings = \App\Models\Setting::first();
         </form>
     </div>
 
+    <!-- <div class="bg-white shadow rounded-lg p-6 space-y-4">
+        <h3 class="text-lg font-semibold text-gray-800 mb-4">Product Updation</h3>
+        <div class="space-y-4">
+            <button id="updateProductsBtn"
+                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">
+                Update Product Title
+            </button>
+
+            <div id="updateStatus" class="hidden p-3 mt-2 rounded"></div>
+        </div>
+    </div> -->
+
     {{-- Card 3: Import Products --}}
     <div class="bg-white shadow rounded-lg p-6 space-y-4">
         <h3 class="text-lg font-semibold text-gray-800 mb-4">Import Products</h3>
         <button id="import-products-btn"
             class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
-            data-url="{{ route('import.products') }}">
+            data-url="{{ route('import.products') }}"
+            data-shop="{{ $shop ?? '' }}">
             Import Products
         </button>
         <!-- Progress and Logs -->
@@ -185,4 +198,42 @@ $settings = \App\Models\Setting::first();
     @endif {{-- End if client created --}}
     @endif {{-- End if verified --}}
 </div>
+<script>
+    document.getElementById('updateProductsBtn').addEventListener('click', function() {
+        let btn = this;
+        let statusBox = document.getElementById('updateStatus');
+
+        btn.disabled = true;
+        btn.innerText = "Processing...";
+        statusBox.classList.remove("hidden");
+        statusBox.innerText = "Updating titles, please wait...";
+
+        fetch("{{ route('settings.updateProductAjax') }}", {
+                method: "POST",
+                headers: {
+                    "X-CSRF-TOKEN": "{{ csrf_token() }}",
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    statusBox.className = "bg-green-100 text-green-800 p-3 mt-2 rounded";
+                    statusBox.innerText = data.message;
+                } else {
+                    statusBox.className = "bg-red-100 text-red-800 p-3 mt-2 rounded";
+                    statusBox.innerText = data.message;
+                }
+            })
+            .catch(error => {
+                statusBox.className = "bg-red-100 text-red-800 p-3 mt-2 rounded";
+                statusBox.innerText = "Error: " + error.message;
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.innerText = "Update Product Title";
+            });
+    });
+</script>
 @endsection

@@ -8,45 +8,340 @@ use Shopify\Clients\Rest as ShopifyRestClient;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Carbon;
 use function Psy\debug;
+use Illuminate\Support\Facades\Log;
 
 class SettingsController extends Controller
 {
 
-    public function index()
+    public function updateProductAjax(Request $request)
     {
-        $settings = Setting::first();
-        $isVerified = false;
+        try {
+            $response = $this->updateProduct($request); // call existing function
+            return response()->json([
+                'success' => true,
+                'message' => 'Products Updated Successfully!'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], 500);
+        }
+    }
 
-        // If we have saved credentials
-        if ($settings && $settings->shopify_store_url && $settings->shopify_token) {
-            try {
+    public function updateProduct(Request $request)
+    {
+        try {
+            $settings = Setting::first();
+            if (!$settings || !$settings->shopify_store_url || !$settings->shopify_token) {
+                return back()->with('error', 'Shopify credentials are missing.');
+            }
 
-                $response = Http::withHeaders([
-                    'X-Shopify-Access-Token' => $settings->shopify_token,
+            Log::info("[UPDATE_PRODUCT_DEBUG] ");
+
+            // $allProducts = [];
+            // $nextPageInfo = null;
+            // $limit = 250;
+            // $pageCount = 1;
+
+            // do {
+
+            //     // if($pageCount == 1){
+            //     //     $pageCount++;
+            //     //     continue;
+            //     // }
+
+            //     $url = "https://{$settings->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
+            //     if ($nextPageInfo) {
+            //         $url .= "&page_info={$nextPageInfo}";
+            //     }
+
+            //     $response = Http::withHeaders([
+            //         'X-Shopify-Access-Token' => $settings->shopify_token,
+            //         'Content-Type' => 'application/json',
+            //     ])->timeout(3600)->get($url);
+
+            //     if (!$response->successful()) {
+            //         return back()->with('error', "Shopify API Failed: " . $response->status());
+            //     }
+
+            //     $products = $response->json('products', []);
+            //     if (empty($products)) break;
+
+            //     $allProducts = array_merge($allProducts, $products);
+
+            //     $linkHeader = $response->header('Link');
+            //     if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
+            //         $nextPageInfo = $matches[1];
+            //         $pageCount++;
+            //     } else {
+            //         $nextPageInfo = null;
+            //     }
+            //     //sleep(10);
+            //     // if ($pageCount == 2) {
+            //     //     break;
+            //     // }
+            // } while ($nextPageInfo);
+
+
+            $limit = 250;
+            $nextPageInfo = null;
+
+            // Build first page request URL
+            //$url = "https://{$settings->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
+
+            $url = "https://rugs-simple.myshopify.com/admin/api/2025-07/products.json?limit=250&page_info=eyJkaXJlY3Rpb24iOiJuZXh0IiwibGFzdF9pZCI6ODU0Nzg5MzU0MzA2NSwibGFzdF92YWx1ZSI6IlR1cmtpc2ggT3VzaGFrIFRhdXBlXC9UYXVwZSJ9";
+
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $settings->shopify_token,
+                'Content-Type' => 'application/json',
+            ])->timeout(3600)->get($url);
+
+            if (!$response->successful()) {
+                Log::error("Shopify API Failed: " . $response->status());
+                return;
+            }
+
+            // Grab the first batch of products
+            $allProducts = $response->json('products', []);
+
+            // Log product IDs or full objects (be mindful of giant logs!)
+            // Log::info('Fetched First Page Products', [
+            //     'product_count' => count($allProducts),
+            //     'product_ids' => collect($allProducts)->pluck('id')
+            // ]);
+
+            // Find the next page via Link header
+            $linkHeader = $response->header('Link');
+            $nextPageUrl = null;
+
+            if ($linkHeader && preg_match('/<([^>]+)>;\s*rel="next"/', $linkHeader, $matches)) {
+                $nextPageUrl = $matches[1];
+            }
+
+            // Log the next URL
+            Log::info('Next Pagination URL:', [
+                'next_url' => $nextPageUrl ?? 'No more pages'
+            ]);
+
+            //Log::info("[UPDATE_PRODUCT_DEBUG] Fetched Products: " . count($allProducts));
+
+            if (empty($allProducts)) {
+                Log::error("Shopify API Failed: No products found");
+                return back()->with('error', 'No products found in Shopify.');
+            }
+
+            [$shopifyProducts, $sku_list] = $this->buildSkuList($allProducts);
+
+            if (empty($sku_list)) {
+                return back()->with('error', 'No valid SKUs found in Shopify.');
+            }
+
+            Log::info("[UPDATE_PRODUCT_DEBUG] Fetched Products: " . json_encode($sku_list));
+
+            $rugToken = $settings->token;
+            $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
+
+            if (!$rugToken || !$tokenExpiry || $tokenExpiry->isPast()) {
+                $tokenResponse = Http::withHeaders([
+                    'Accept' => 'application/json',
                     'Content-Type' => 'application/json',
-                ])->get("https://{$settings->shopify_store_url}/admin/api/2025-07/shop.json");
+                    'x-api-key' => $settings->api_key,
+                ])->post('https://plugin-api.rugsimple.com/api/token');
 
-                if ($response->successful()) {
-                    $isVerified = true;
+                if (!$tokenResponse->successful()) {
+                    Log::error("[UPDATE_PRODUCT_DEBUG] Failed to get Rug API token: " . $tokenResponse->body());
+                    return back()->with('error', 'Failed to get Rug API token.');
                 }
-            } catch (\Exception $e) {
-                $isVerified = false;
+
+                $rugToken = $tokenResponse['token'];
+                $settings->update([
+                    'token' => $rugToken,
+                    'token_expiry' => Carbon::now()->addHours(3)
+                ]);
+            }
+
+            Log::info("[UPDATE_PRODUCT_DEBUG] Fetched before fetchRugProducts");
+
+            $rugProducts = $this->fetchRugProducts($rugToken, $sku_list);
+
+            //Log::info("[UPDATE_PRODUCT_DEBUG] Fetched Products: " . count($rugProducts));
+
+            if (empty($rugProducts)) {
+                return back()->with('error', 'No Rug Product Data Found.');
+            }
+
+            Log::info("[UPDATE_PRODUCT_DEBUG] Fetched Rug Products: " . count($rugProducts));
+
+            $processedProducts = $this->process_product_data($rugProducts);
+            $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+
+            $updatedCount = 0;
+            $failedCount = 0;
+
+            foreach ($processedProducts as $rug) {
+                $sku = $rug['ID'] ?? '';
+                if (!$sku || !isset($shopifyProducts[$sku])) continue;
+
+                $shopifyData = $shopifyProducts[$sku];
+                $productId = $shopifyData['product_id'];
+                $updatePayload = [];
+
+                $size = $rug['size'];
+                $updatedTitle = $rug['title'] . ' #' . $rug['ID'];
+
+                if (isset($size) && $size != '') {
+                    $updatedTitle = $size . ' ' . $updatedTitle;
+                }
+
+                //Log::info("[UPDATE_PRODUCT_DEBUG] Shopify Title: {$shopifyData['title']}");
+                //Log::info("[UPDATE_PRODUCT_DEBUG] Updated Title: {$updatedTitle}");
+
+                if (!empty($updatedTitle) && $updatedTitle !== $shopifyData['title']) {
+                    $updatePayload['title'] = $updatedTitle;
+
+                    Log::info("[UPDATE_PRODUCT_DEBUG] Updated Title: {$updatedTitle}");
+                }
+
+                if (!empty($updatePayload)) {
+                    $url = "https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json";
+                    $response = Http::withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type' => 'application/json',
+                    ])->put($url, [
+                        'product' => $updatePayload
+                    ]);
+
+                    if ($response->successful()) {
+                        $updatedCount++;
+                        Log::info("[UPDATE_PRODUCT_DEBUG] Updated Title: {$updatedTitle}");
+                    } else {
+                        $failedCount++;
+                        Log::info("[UPDATE_PRODUCT_DEBUG] failed: {$sku}");
+                    }
+                }
+
+                // sleep(2);
+            }
+
+            return back()->with('success', "Successfully updated: {$updatedCount}, Failed: {$failedCount}");
+        } catch (\Exception $e) {
+            return back()->with('error', 'Error: ' . $e->getMessage());
+        }
+    }
+
+    private function buildSkuList($allProducts)
+    {
+        $products = [];
+        $sku_list = [];
+
+        foreach ($allProducts as $product) {
+            foreach ($product['variants'] ?? [] as $variant) {
+                $sku = $variant['sku'] ?? null;
+                if ($sku) {
+                    $sku_list[] = $sku;
+                    $products[$sku] = [
+                        'title' => $product['title'],
+                        'product_id' => $product['id'],
+                    ];
+                }
+            }
+        }
+        return [$products, $sku_list];
+    }
+
+    private function fetchRugProducts($token, $sku_list)
+    {
+        $response = Http::withHeaders([
+            'Content-Type' => 'application/json',
+            'Accept' => 'application/json',
+            'Authorization' => 'Bearer ' . $token,
+        ])->timeout(3600)->post('https://plugin-api.rugsimple.com/api/rug', [
+            'ids' => $sku_list
+        ]);
+
+        if (!$response->successful()) {
+            $this->log("❌ Failed to fetch Rug products. Status: " . $response->status());
+            return [];
+        }
+
+        $data = $response->json();
+        return $data['data'] ?? [];
+    }
+
+
+    public function index(Request $request)
+    {
+        $shop = $request->query('shop'); // URL se shop mil jayega
+
+        $isVerified = false;
+        $settings = null;
+
+        if ($shop) {
+            // Check shop exists in DB or not
+            $settings = Setting::where('shopify_store_url', $shop)->first();
+
+            if ($settings && $settings->shopify_token) {
+                try {
+                    $response = Http::withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type' => 'application/json',
+                    ])->get("https://{$shop}/admin/api/2025-07/shop.json");
+
+                    if ($response->successful()) {
+                        $isVerified = true;
+                    }
+                } catch (\Exception $e) {
+                    $isVerified = false;
+                }
             }
         }
 
-        return view('settings', compact('isVerified', 'settings'));
+        return view('settings', compact('isVerified', 'settings', 'shop'));
     }
-    public function showImportLogs()
-    {
-        $logFiles = [];
-        $logDir = storage_path('logs/imports');
 
+
+
+
+    // public function index(Request $request)
+    // {
+    //     $settings = Setting::first();
+    //     $isVerified = false;
+
+    //     $shop = $request->get('shop');
+
+    //     // If we have saved credentials
+    //     if ($settings && $settings->shopify_store_url && $settings->shopify_token) {
+    //         try {
+
+    //             $response = Http::withHeaders([
+    //                 'X-Shopify-Access-Token' => $settings->shopify_token,
+    //                 'Content-Type' => 'application/json',
+    //             ])->get("https://{$settings->shopify_store_url}/admin/api/2025-07/shop.json");
+
+    //             if ($response->successful()) {
+    //                 $isVerified = true;
+    //             }
+    //         } catch (\Exception $e) {
+    //             $isVerified = false;
+    //         }
+    //     }
+
+    //     return view('settings', compact('isVerified', 'settings','shop'));
+    // }
+    public function showImportLogs(Request $request)
+    {
+        $shop = $request->query('shop') ?? session('shop');
+        $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shop, PHP_URL_HOST) ?? $shop);
+        $logDir = storage_path('logs/imports/' . $shopSlug);
+
+        $logFiles = [];
         if (file_exists($logDir)) {
             $logFiles = array_reverse(glob($logDir . '/*.log'));
             $logFiles = array_map('basename', $logFiles);
         }
 
-        $selectedLog = request('log');
+        $selectedLog = $request->query('log');
         $logEntries = [];
 
         if ($selectedLog && in_array($selectedLog, $logFiles)) {
@@ -57,9 +352,13 @@ class SettingsController extends Controller
         return view('import-logs', [
             'logFiles' => $logFiles,
             'selectedLog' => $selectedLog,
-            'logEntries' => $logEntries
+            'logEntries' => $logEntries,
+            'shopSlug' => $shopSlug,
         ]);
     }
+
+
+
 
     protected function parseLogEntries($logContent)
     {
@@ -95,16 +394,28 @@ class SettingsController extends Controller
 
     public function update(Request $request)
     {
-        $settings = Setting::firstOrCreate([]);
+        $request->validate([
+            'shop' => 'required|string'
+        ]);
+
+        $shopUrl = rtrim($request->shop, '/');
+
+        // ✅ Find store record
+        $settings = Setting::where('shopify_store_url', $shopUrl)->first();
+
+        if (!$settings) {
+            return back()->with('error', 'Store not found! Please save Shopify credentials first.');
+        }
+
+        // ✅ Only update allowed fields
         $settings->update($request->only('email', 'product_limit', 'product_skip'));
-        return back()->with('success', 'Settings updated.');
+
+        return back()->with('success', '✅ Settings updated successfully.');
     }
+
 
     public function saveShopifyCredentials(Request $request)
     {
-
-        //dd($request->all());
-
         $request->validate([
             'shopify_store_url' => 'required|string',
             'shopify_token' => 'required|string',
@@ -116,27 +427,37 @@ class SettingsController extends Controller
         $shopUrl = rtrim($request->shopify_store_url, '/');
         $accessToken = $request->shopify_token;
 
-        // dd($shopUrl);
-
         try {
-            // Make a test request to Shopify Admin API to validate credentials
+            // Validate token with Shopify API
             $response = Http::withHeaders([
                 'X-Shopify-Access-Token' => $accessToken,
                 'Content-Type' => 'application/json',
             ])->get("https://{$shopUrl}/admin/api/2025-07/shop.json");
 
-
             if ($response->successful()) {
 
-                $shopData = $response->json();
+                // ✅ Check using the shop URL
+                $settings = Setting::where('shopify_store_url', $shopUrl)->first();
 
-                $settings = Setting::firstOrCreate([]);
-                $settings->update($request->only('shopify_store_url', 'shopify_token'));
+                if ($settings) {
+                    // ✅ Update existing store record
+                    $settings->update([
+                        'shopify_token' => $accessToken
+                    ]);
 
-                return back()->with('success', '✅ Shopify credentials verified and saved successfully.');
-            } else {
-                return back()->with('error', '❌ Invalid credentials. Please check your URL or token.');
+                    return back()->with('success', '✅ Store credentials updated successfully.');
+                } else {
+                    // ✅ Create new store record
+                    Setting::create([
+                        'shopify_store_url' => $shopUrl,
+                        'shopify_token' => $accessToken,
+                    ]);
+
+                    return back()->with('success', '✅ New store credentials saved successfully.');
+                }
             }
+
+            return back()->with('error', '❌ Invalid credentials. Please check your URL or token.');
         } catch (\Exception $e) {
             return back()->with('error', '❌ Failed to connect to Shopify: ' . $e->getMessage());
         }
@@ -144,59 +465,61 @@ class SettingsController extends Controller
 
     public function verifyToken()
     {
-        $settings = Setting::firstOrCreate([]);
+        // $settings = Setting::firstOrCreate([]);
 
-        if (!$settings || !$settings->shopify_store_url || !$settings->shopify_token) {
-            return response()->json(['valid' => false, 'message' => 'No credentials found']);
-        }
+        // if (!$settings || !$settings->shopify_store_url || !$settings->shopify_token) {
+        //     return response()->json(['valid' => false, 'message' => 'No credentials found']);
+        // }
 
-        $storeUrl = $settings->shopify_store_url;
-        $token = $settings->shopify_token;
+        // $storeUrl = $settings->shopify_store_url;
+        // $token = $settings->shopify_token;
 
-        try {
-            $url = "https://{$storeUrl}/admin/api/2024-01/shop.json";
+        // try {
+        //     $url = "https://{$storeUrl}/admin/api/2024-01/shop.json";
 
-            $response = Http::withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url);
+        //     $response = Http::withHeaders([
+        //         'X-Shopify-Access-Token' => $token,
+        //         'Content-Type' => 'application/json',
+        //     ])->get($url);
 
-            if ($response->successful()) {
-                return response()->json(['valid' => true]);
-            } else {
-                return response()->json(['valid' => false, 'message' => 'Invalid credentials']);
-            }
-        } catch (\Exception $e) {
-            return response()->json(['valid' => false, 'message' => 'Connection failed']);
-        }
+        //     if ($response->successful()) {
+        //         return response()->json(['valid' => true]);
+        //     } else {
+        //         return response()->json(['valid' => false, 'message' => 'Invalid credentials']);
+        //     }
+        // } catch (\Exception $e) {
+        //     return response()->json(['valid' => false, 'message' => 'Connection failed']);
+        // }
     }
 
     public function createClient(Request $request)
     {
         try {
+            $request->validate([
+                'email' => 'required|email',
+                'shop' => 'required|string'
+            ]);
 
-            //dd( $request->input('email') );
+            $shopUrl = rtrim($request->shop, '/');
 
-            $settings = Setting::firstOrCreate([]);
-            // Ensure we always have a saved email
-            if ($request->has('email')) {
-                // Setting::updateOrCreate(['id' => 1], [ // or your settings key
-                //     'email' => $request->input('email')
-                // ]);
-                $settings->update($request->only('email'));
+            // ✅ Check specific store exists
+            $settings = Setting::where('shopify_store_url', $shopUrl)->first();
+
+            if (!$settings) {
+                return back()->with('error', 'Store not found! Please save Shopify credentials first.');
             }
 
-
-            //return back()->with('error', $request->input('email'));
-
-
+            // ✅ Update new email for this shop
+            $settings->update([
+                'email' => $request->email
+            ]);
 
             $email = $settings->email;
-
             if (!$email) {
                 return back()->with('error', 'Email is required before creating a client.');
             }
 
+            // ✅ API request to create client
             $response = Http::retry(3, 1000)
                 ->timeout(30)
                 ->withHeaders([
@@ -206,29 +529,29 @@ class SettingsController extends Controller
                     'email' => $email
                 ]);
 
-            // Check if response was successful
             if ($response->successful()) {
                 $responseData = $response->json();
 
                 if (isset($responseData['data']['API_KEY'])) {
-                    $settings->api_key = $responseData['data']['API_KEY'];
-                    $settings->save();
+                    // ✅ Update only this shop record
+                    $settings->update([
+                        'api_key' => $responseData['data']['API_KEY']
+                    ]);
 
-                    return back()->with('success', 'Client created and API key saved.');
+                    return back()->with('success', '✅ Client created and API key saved.');
                 }
 
-                // If no API key but has error message
                 if (isset($responseData['error'])) {
-                    return back()->with('error', 'Error: ' . $responseData['error']);
+                    return back()->with('error', '❌ Error: ' . $responseData['error']);
                 }
             }
 
-            // If response failed
-            return back()->with('error', 'Failed to create client. HTTP Status: ' . $response->status());
+            return back()->with('error', '❌ Failed to create client. HTTP Status: ' . $response->status());
         } catch (\Exception $e) {
-            return back()->with('error', 'Exception: ' . $e->getMessage());
+            return back()->with('error', '❌ Exception: ' . $e->getMessage());
         }
     }
+
 
     // public function createClient()
     // {
@@ -284,11 +607,22 @@ class SettingsController extends Controller
     //     return back()->with('error', 'Failed to create client.');
     // }
 
-    public function deleteClient()
+    public function deleteClient(Request $request)
     {
-        $settings = Setting::first();
+        $request->validate([
+            'shop' => 'required|string'
+        ]);
 
-        if (!$settings || !$settings->email || !$settings->api_key) {
+        $shopUrl = rtrim($request->shop, '/');
+
+        // ✅ Find store record
+        $settings = Setting::where('shopify_store_url', $shopUrl)->first();
+
+        if (!$settings) {
+            return back()->with('error', 'Store not found! Please save Shopify credentials first.');
+        }
+
+        if (!$settings->email || !$settings->api_key) {
             return back()->with('error', 'Email or API key missing. Please create client first.');
         }
 
@@ -298,7 +632,7 @@ class SettingsController extends Controller
 
         try {
             $response = Http::withHeaders([
-                'x-api-key'    => $apiKey,
+                'x-api-key' => $apiKey,
                 'Content-Type' => 'application/json',
             ])->timeout(3600)->delete($deleteUrl);
 
@@ -309,89 +643,85 @@ class SettingsController extends Controller
                 case 200:
                 case 201:
                 case 204:
-                    // Clear local DB keys
+                    // ✅ Clear ONLY the current store's credentials
                     $settings->update([
                         'api_key' => null,
                         'token' => null,
                         'token_expiry' => null,
-                        'email' => null
+                        'email' => null,
                     ]);
 
-                    return back()->with('success', $body['message'] ?? 'Client deleted successfully.');
+                    return back()->with('success', $body['message'] ?? '✅ Client deleted successfully.');
 
                 case 404:
-                    return back()->with('error', $body['error'] ?? 'Client not found.');
+                    return back()->with('error', $body['error'] ?? '❌ Client not found.');
 
                 case 401:
                 case 403:
-                    return back()->with('error', 'Unauthorized or forbidden request. Check your API key.');
+                    return back()->with('error', '❌ Unauthorized: Invalid or expired API key.');
 
                 default:
                     return back()->with('error', $body['error'] ?? "Unexpected error. HTTP Code: $status");
             }
         } catch (\Exception $e) {
-            return back()->with('error', 'API connection failed: ' . $e->getMessage());
+            return back()->with('error', '❌ API connection failed: ' . $e->getMessage());
         }
     }
 
-    public function importProducts()
+    public function importProducts(Request $request)
     {
-        // Check if this is a streaming request
+        $shop = $request->input('shop');
+        $settings = Setting::where('shopify_store_url', $shop)->first();
 
+        if (!$settings) {
+            return back()->with('error', 'Shop not found.');
+        }
 
-        // Set SSE headers
+        // === Set SSE headers ===
         @ini_set('zlib.output_compression', 0);
         @ini_set('output_buffering', 0);
         @ini_set('output_handler', '');
         header('Content-Type: text/event-stream');
         header('Cache-Control: no-cache');
         header('Connection: keep-alive');
-        header('X-Accel-Buffering: no');
+        header('X-Accel-Buffering', 'no');
 
-        // Create log file name with timestamp
-        $logFileName = 'import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
-        $logFilePath = storage_path('logs/imports/' . $logFileName);
+        // === Create shop-specific log folder ===
+        $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shop, PHP_URL_HOST) ?? $shop);
+        $logDir = storage_path('logs/imports/' . $shopSlug);
 
-        // Ensure directory exists
-        if (!file_exists(dirname($logFilePath))) {
-            mkdir(dirname($logFilePath), 0777, true);
+        if (!file_exists($logDir)) {
+            mkdir($logDir, 0777, true);
         }
 
-        // Function to send SSE messages
-        // $sendMessage = function ($data) {
-        //     echo "data: " . json_encode($data) . "\n\n";
-        //     ob_flush();
-        //     flush();
-        //     if (connection_aborted()) exit();
-        // };
+        // === Create log file with timestamp ===
+        $logFileName = 'import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
+        $logFilePath = $logDir . '/' . $logFileName;
 
+        // === SSE log sender ===
         $sendMessage = function ($data) use ($logFilePath) {
-            // Format log entry
             $timestamp = now()->format('Y-m-d H:i:s');
-            $type = $data['type'] ?? 'info';
             $message = $data['message'] ?? '';
 
-            // Format for file storage
+            // Save log entry to file
             $logEntry = "[$timestamp] $message";
             file_put_contents($logFilePath, $logEntry . PHP_EOL, FILE_APPEND);
 
-            // Format for SSE
+            // Send to SSE stream
             $data['timestamp'] = $timestamp;
             echo "data: " . json_encode($data) . "\n\n";
             ob_flush();
             flush();
         };
 
-        set_time_limit(1000); // 1000 seconds = 16 minutes and 40 seconds
+       set_time_limit(1000);
 
         $logs = [];
         $successCount = 0;
         $failCount = 0;
         $skippedCount = 0;
 
-
-
-        $settings = Setting::first();
+        //$settings = Setting::first();
 
         if (!$settings || !$settings->api_key) {
             if (request()->has('stream')) {
@@ -405,7 +735,7 @@ class SettingsController extends Controller
         $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
 
         if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
-
+            // Request a new token
             $tokenResponse = Http::withHeaders([
                 'Content-Type' => 'application/json',
                 'Accept' => 'application/json',
@@ -414,19 +744,31 @@ class SettingsController extends Controller
 
             if (!$tokenResponse->successful() || !isset($tokenResponse['token'])) {
                 if (request()->has('stream')) {
-                    $sendMessage(['error' => 'Failed to get token.']);
+                    $sendMessage(['error' => 'Failed to get token for shop: ' . ($settings->shopify_store_url ?? 'unknown')]);
                     exit;
                 }
-                return back()->with('error', 'Failed to get token.');
+                return back()->with('error', 'Failed to get token for this shop.');
             }
 
+            // Save new token and expiry against the correct shop record
             $token = $tokenResponse['token'];
-            $settings->token = $token;
-            $settings->token_expiry = Carbon::now()->addHours(3);
-            $settings->save();
+            $settings->update([
+                'token' => $token,
+                'token_expiry' => now()->addHours(3),
+            ]);
+
+            $sendMessage([
+                'type' => 'info',
+                'message' => 'New token generated successfully for shop: ' . $settings->shopify_store_url,
+            ]);
         } else {
             $token = $settings->token;
+            $sendMessage([
+                'type' => 'info',
+                'message' => 'Using existing valid token for shop: ' . $settings->shopify_store_url,
+            ]);
         }
+
 
         // === Get Products ===
         $limit = $settings->product_limit ?? 10;

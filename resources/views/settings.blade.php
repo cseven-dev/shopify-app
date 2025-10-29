@@ -198,42 +198,4 @@
     @endif {{-- End if client created --}}
     @endif {{-- End if verified --}}
 </div>
-<script>
-    document.getElementById('updateProductsBtn').addEventListener('click', function() {
-        let btn = this;
-        let statusBox = document.getElementById('updateStatus');
-
-        btn.disabled = true;
-        btn.innerText = "Processing...";
-        statusBox.classList.remove("hidden");
-        statusBox.innerText = "Updating titles, please wait...";
-
-        fetch("{{ route('settings.updateProductAjax') }}", {
-                method: "POST",
-                headers: {
-                    "X-CSRF-TOKEN": "{{ csrf_token() }}",
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({})
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    statusBox.className = "bg-green-100 text-green-800 p-3 mt-2 rounded";
-                    statusBox.innerText = data.message;
-                } else {
-                    statusBox.className = "bg-red-100 text-red-800 p-3 mt-2 rounded";
-                    statusBox.innerText = data.message;
-                }
-            })
-            .catch(error => {
-                statusBox.className = "bg-red-100 text-red-800 p-3 mt-2 rounded";
-                statusBox.innerText = "Error: " + error.message;
-            })
-            .finally(() => {
-                btn.disabled = false;
-                btn.innerText = "Update Product Title";
-            });
-    });
-</script>
 @endsection

@@ -24,7 +24,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
             // Get shop value from button
             const shop = importBtn.dataset.shop;
-            console.log(shop);
 
             // Create EventSource connection
             const eventSource = new EventSource(importBtn.dataset.url + '?stream=true&shop=' + shop);

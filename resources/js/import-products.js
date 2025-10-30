@@ -25,15 +25,20 @@ document.addEventListener('DOMContentLoaded', function () {
             // Get shop value from button
             const shop = importBtn.dataset.shop;
 
+            console.log('Starting import for shop:', shop);
+
             // Create EventSource connection
             const eventSource = new EventSource(importBtn.dataset.url + '?stream=true&shop=' + shop);
+
+            console.log('EventSource created with URL:', importBtn.dataset.url + '?stream=true&shop=' + shop);
 
             eventSource.onmessage = function (e) {
                 try {
                     const data = JSON.parse(e.data);
-
+                    console.log('Received data:', data);
                     // Handle progress updates
                     if (data.type === 'progress') {
+                        console.log('Progress update:', data.progress);
                         progressBar.style.width = data.progress + '%';
                         progressBar.textContent = data.progress + '%';
                         progressText.textContent = data.message;
@@ -41,6 +46,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     }
                     // Handle completion
                     else if (data.type === 'complete') {
+                        console.log('Import complete:', data);
                         progressBar.style.width = '100%';
                         progressBar.textContent = '100%';
                         progressText.textContent = data.message;
@@ -51,6 +57,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     }
                     // Handle errors
                     else if (data.type === 'error') {
+                        console.log('Import error:', data);
                         addLogItem(`❌ ${data.message}`, 'error');
                         progressText.textContent = 'Import failed';
                         eventSource.close();
@@ -58,12 +65,14 @@ document.addEventListener('DOMContentLoaded', function () {
                         importBtn.innerHTML = '📦 Import Products';
                     }
                 } catch (error) {
+                    console.log('Error processing message:', e.data);
                     addLogItem('❌ Error processing server response', 'error');
                     console.error('Error:', error);
                 }
             };
 
             eventSource.onerror = function () {
+                console.log('EventSource error');
                 addLogItem('❌ Connection to server interrupted', 'error');
                 progressText.textContent = 'Connection lost';
                 eventSource.close();

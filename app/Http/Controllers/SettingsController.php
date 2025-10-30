@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Carbon;
 use function Psy\debug;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SettingsController extends Controller
 {
@@ -301,34 +302,6 @@ class SettingsController extends Controller
     }
 
 
-
-
-    // public function index(Request $request)
-    // {
-    //     $settings = Setting::first();
-    //     $isVerified = false;
-
-    //     $shop = $request->get('shop');
-
-    //     // If we have saved credentials
-    //     if ($settings && $settings->shopify_store_url && $settings->shopify_token) {
-    //         try {
-
-    //             $response = Http::withHeaders([
-    //                 'X-Shopify-Access-Token' => $settings->shopify_token,
-    //                 'Content-Type' => 'application/json',
-    //             ])->get("https://{$settings->shopify_store_url}/admin/api/2025-07/shop.json");
-
-    //             if ($response->successful()) {
-    //                 $isVerified = true;
-    //             }
-    //         } catch (\Exception $e) {
-    //             $isVerified = false;
-    //         }
-    //     }
-
-    //     return view('settings', compact('isVerified', 'settings','shop'));
-    // }
     public function showImportLogs(Request $request)
     {
         $shop = $request->query('shop') ?? session('shop');
@@ -354,10 +327,9 @@ class SettingsController extends Controller
             'selectedLog' => $selectedLog,
             'logEntries' => $logEntries,
             'shopSlug' => $shopSlug,
+            'shop' => $shop,
         ]);
     }
-
-
 
 
     protected function parseLogEntries($logContent)
@@ -463,35 +435,6 @@ class SettingsController extends Controller
         }
     }
 
-    public function verifyToken()
-    {
-        // $settings = Setting::firstOrCreate([]);
-
-        // if (!$settings || !$settings->shopify_store_url || !$settings->shopify_token) {
-        //     return response()->json(['valid' => false, 'message' => 'No credentials found']);
-        // }
-
-        // $storeUrl = $settings->shopify_store_url;
-        // $token = $settings->shopify_token;
-
-        // try {
-        //     $url = "https://{$storeUrl}/admin/api/2024-01/shop.json";
-
-        //     $response = Http::withHeaders([
-        //         'X-Shopify-Access-Token' => $token,
-        //         'Content-Type' => 'application/json',
-        //     ])->get($url);
-
-        //     if ($response->successful()) {
-        //         return response()->json(['valid' => true]);
-        //     } else {
-        //         return response()->json(['valid' => false, 'message' => 'Invalid credentials']);
-        //     }
-        // } catch (\Exception $e) {
-        //     return response()->json(['valid' => false, 'message' => 'Connection failed']);
-        // }
-    }
-
     public function createClient(Request $request)
     {
         try {
@@ -551,61 +494,6 @@ class SettingsController extends Controller
             return back()->with('error', '❌ Exception: ' . $e->getMessage());
         }
     }
-
-
-    // public function createClient()
-    // {
-
-    //     //return back()->with('error', 'Email is required before creating a client.');
-
-    //     $settings = Setting::firstOrCreate([]);
-
-    //     //dd($settings->email);
-
-    //     $email = $settings->email;
-
-    //     if (!$email) {
-    //         return back()->with('error', 'Email is required before creating a client.');
-    //     }
-
-    //     // $response = Http::withHeaders([
-    //     //     'Content-Type' => 'application/json',
-    //     //     'Accept' => 'application/json',
-    //     // ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
-    //     //     'email' => $email
-    //     // ]);
-
-    //     $response = Http::retry(3, 1000) // Retry 3 times with 1 second delay
-    //         ->timeout(3600) // 30 second timeout
-    //         ->withHeaders([
-    //             'Content-Type' => 'application/json',
-    //             'Accept' => 'application/json',
-    //         ])->post('https://plugin-api.rugsimple.com/admin/create-client', [
-    //             'email' => $email
-    //         ]);
-
-    //     //echo '<pre>'; // Debugging line to see the response
-    //     //print_r($response->json()); // Print the response for debugging
-    //     //echo '</pre>';
-
-    //     //debug($response->json()); // Debugging line to see the response
-
-    //     //dd($response->json());
-
-    //     if ($response->successful() && isset($response['data']['API_KEY'])) {
-    //         $settings->api_key = $response['data']['API_KEY'];
-    //         $settings->save();
-
-    //         return back()->with('success', 'Client created and API key saved.');
-    //     }
-
-    //     // If the response has an error, handle it
-    //     if (isset($response['error'])) {
-    //         return back()->with('error', 'Error: ' . $response['error']);
-    //     }
-
-    //     return back()->with('error', 'Failed to create client.');
-    // }
 
     public function deleteClient(Request $request)
     {
@@ -677,825 +565,659 @@ class SettingsController extends Controller
             return back()->with('error', 'Shop not found.');
         }
 
-        // === Set SSE headers ===
-        @ini_set('zlib.output_compression', 0);
-        @ini_set('output_buffering', 0);
-        @ini_set('output_handler', '');
-        header('Content-Type: text/event-stream');
-        header('Cache-Control: no-cache');
-        header('Connection: keep-alive');
-        header('X-Accel-Buffering', 'no');
+        // Create StreamedResponse for SSE (real-time browser updates)
+        $response = new StreamedResponse(function () use ($request, $settings, $shop) {
 
-        // === Create shop-specific log folder ===
-        $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shop, PHP_URL_HOST) ?? $shop);
-        $logDir = storage_path('logs/imports/' . $shopSlug);
+            // Ensure real-time flushing works
+            @ini_set('zlib.output_compression', 0);
+            @ini_set('output_buffering', 'off');
+            @ini_set('implicit_flush', true);
+            while (ob_get_level() > 0) {
+                ob_end_flush();
+            }
+            ob_implicit_flush(true);
 
-        if (!file_exists($logDir)) {
-            mkdir($logDir, 0777, true);
-        }
-
-        // === Create log file with timestamp ===
-        $logFileName = 'import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
-        $logFilePath = $logDir . '/' . $logFileName;
-
-        // === SSE log sender ===
-        $sendMessage = function ($data) use ($logFilePath) {
-            $timestamp = now()->format('Y-m-d H:i:s');
-            $message = $data['message'] ?? '';
-
-            // Save log entry to file
-            $logEntry = "[$timestamp] $message";
-            file_put_contents($logFilePath, $logEntry . PHP_EOL, FILE_APPEND);
-
-            // Send to SSE stream
-            $data['timestamp'] = $timestamp;
-            echo "data: " . json_encode($data) . "\n\n";
-            ob_flush();
+            echo str_repeat(' ', 4096); // kickstart output buffer
             flush();
-        };
 
-       set_time_limit(1000);
-
-        $logs = [];
-        $successCount = 0;
-        $failCount = 0;
-        $skippedCount = 0;
-
-        //$settings = Setting::first();
-
-        if (!$settings || !$settings->api_key) {
-            if (request()->has('stream')) {
-                $sendMessage(['error' => 'API Key not found. Please create client first.']);
-                exit;
-            }
-            return back()->with('error', 'API Key not found. Please create client first.');
-        }
-
-        // === Token Handling ===
-        $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
-
-        if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
-            // Request a new token
-            $tokenResponse = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Accept' => 'application/json',
-                'x-api-key' => $settings->api_key,
-            ])->timeout(3600)->post('https://plugin-api.rugsimple.com/api/token');
-
-            if (!$tokenResponse->successful() || !isset($tokenResponse['token'])) {
-                if (request()->has('stream')) {
-                    $sendMessage(['error' => 'Failed to get token for shop: ' . ($settings->shopify_store_url ?? 'unknown')]);
-                    exit;
-                }
-                return back()->with('error', 'Failed to get token for this shop.');
+            // === Shop-specific log directory ===
+            $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shop, PHP_URL_HOST) ?? $shop);
+            $logDir = storage_path('logs/imports/' . $shopSlug);
+            if (!file_exists($logDir)) {
+                mkdir($logDir, 0777, true);
             }
 
-            // Save new token and expiry against the correct shop record
-            $token = $tokenResponse['token'];
-            $settings->update([
-                'token' => $token,
-                'token_expiry' => now()->addHours(3),
-            ]);
-
-            $sendMessage([
-                'type' => 'info',
-                'message' => 'New token generated successfully for shop: ' . $settings->shopify_store_url,
-            ]);
-        } else {
-            $token = $settings->token;
-            $sendMessage([
-                'type' => 'info',
-                'message' => 'Using existing valid token for shop: ' . $settings->shopify_store_url,
-            ]);
-        }
-
-
-        // === Get Products ===
-        $limit = $settings->product_limit ?? 10;
-        $skip = $settings->product_skip ?? 0;
-
-        $productResponse = Http::withHeaders([
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-            'Authorization' => 'Bearer ' . $token,
-        ])->timeout(3600)->get('https://plugin-api.rugsimple.com/api/rug', [
-            'limit' => $limit,
-            'skip' => $skip,
-        ]);
-
-        if (!$productResponse->successful()) {
-            if (request()->has('stream')) {
-                $sendMessage(['error' => 'Failed to fetch products.']);
-                exit;
-            }
-            return back()->with('error', 'Failed to fetch products.');
-        }
-
-        $responseData = $productResponse->json();
-        $products = $responseData['data'] ?? [];
-
-        if (!$settings->shopify_store_url || !$settings->shopify_token) {
-            if (request()->has('stream')) {
-                $sendMessage(['error' => 'Shopify store URL or access token is missing.']);
-                exit;
-            }
-            return back()->with('error', 'Shopify store URL or access token is missing.');
-        }
-
-        $shopifyDomain = rtrim($settings->shopify_store_url, '/');
-        $successCount = 0;
-        $skippedCount = 0;
-
-        // Process the product data
-        $processedProducts = $this->process_product_data($products);
-
-        $totalProducts = count($processedProducts);
-        $processed = 0;
-
-        foreach ($processedProducts as $product) {
-
-            $processed++;
-            $progress = round(($processed / $totalProducts) * 100);
-
-            if (request()->has('stream')) {
-                $sendMessage([
-                    'progress' => $progress,
-                    'message' => 'Starting import of: ' . ($product['title'] ?? 'Untitled'),
-                    'type' => 'progress'
-                ]);
-            }
-
-            // Get the SKU we'll use to check for existing products
-            $sku = $product['ID'] ?? null; // ID will be used for sku
-
-            if (!$sku) {
-                $logs[] = ['message' => '❌ Failed: Missing SKU.' . ($product['title'] ?? 'Untitled'), 'success' => false];
-                $message = '❌ Failed: Missing SKU.' . ($product['title'] ?? 'Untitled');
-                $failCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue; // Skip products without a SKU
-            }
-
-            if (empty($product['title'])) {
-                $logs[] = ['message' => '❌ Failed: Missing Product Title. (' . $sku . ')  ', 'success' => false];
-                $message = '❌ Failed: Missing Product Title. (' . $sku . ')';
-                $failCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue; // Skip products without a SKU
-            }
-
-            if (empty($product['regularPrice'])) {
-                $logs[] = ['message' => '❌ Failed: Missing Regular Price. (' . $sku . ')  ', 'success' => false];
-                $message = '❌ Failed: Missing Regular Price. (' . $sku . ')';
-                $failCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue; // Skip products without a regular Price
-            }
-
-            if (empty($product['product_category'])) {
-                $logs[] = ['message' => '❌ Failed: Missing Product Category. Rental:Sale:Both (' . $sku . ')  ', 'success' => false];
-                $message = '❌ Failed: Missing Product Category. Rental:Sale:Both (' . $sku . ')';
-                $failCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue; // Skip products without a product category
-            }
-
-            if (empty($product['images'])) {
-                $logs[] = ['message' => '❌ Failed: Missing Product Product Images. (' . $sku . ')  ', 'success' => false];
-                $message = '❌ Failed: Missing Product Product Images. (' . $sku . ')';
-                $failCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue; // Skip products without a product category
-            }
-
-            // Check if product already exists in Shopify
-            $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
-
-            if ($existingSkuProduct) {
-                $logs[] = ['message' => '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
-                $message = '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
-                $skippedCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue;
-            }
-
-            // Check if product already exists in Shopify
-            $existingTitleProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
-
-            if ($existingTitleProduct) {
-                $logs[] = ['message' => '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
-                $message = '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
-                $skippedCount++;
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                continue;
-            }
-
-            // Prepare tags array
-            $tags = [];
-
-            // Add product category tags
-            if (!empty($product['product_category'])) {
-                if ($product['product_category'] === 'both') {
-                    $tags[] = 'Rugs for Rent';
-                    $tags[] = 'Rugs for Sale';
-                } elseif ($product['product_category'] === 'rental') {
-                    $tags[] = 'Rugs for Rent';
-                } elseif ($product['product_category'] === 'sale') {
-                    $tags[] = 'Rugs for Sale';
-                }
-            }
-
-            // Add other tags from WordPress taxonomies
-            $tagFields = [
-                //'condition',
-                'constructionType',
-                'country',
-                //'production',
-                'primaryMaterial',
-                'design',
-                'palette',
-                'pattern',
-                //'pile',
-                //'period',
-                'styleTags',
-                //'otherTags',
-                'foundation',
-                //'age',
-                //'quality',
-                'region',
-                //'density',
-                //'knots',
-                'rugType',
-                'productType'
-            ];
-
-            foreach ($tagFields as $field) {
-                if (!empty($product[$field])) {
-                    // Check if the field is a comma-separated string
-                    if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
-                        // Split the comma-separated string and add each value as a tag
-                        $values = array_map('trim', explode(',', $product[$field]));
-                        foreach ($values as $value) {
-                            $tags[] = $value;
-                        }
-                    } else {
-                        // Add the single value as a tag
-                        $tags[] = $product[$field];
-                    }
-                }
-            }
-
-            // Add size category tags (already processed as comma-separated string)
-            if (!empty($product['sizeCategoryTags'])) {
-                $sizeTags = array_map('trim', explode(',', $product['sizeCategoryTags']));
-                foreach ($sizeTags as $sizeTag) {
-                    $tags[] = $sizeTag;
-                }
-            }
-
-            // Add shape category tags (already processed as comma-separated string)
-            $shapeTags = [];
-            if (!empty($product['shapeCategoryTags'])) {
-                $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
-                foreach ($shapeTags as $shapeTag) {
-                    $tags[] = $shapeTag;
-                }
-            }
-
-            // Add color tags (already processed as comma-separated string)
-            $variationColors = [];
-            if (!empty($product['colourTags'])) {
-                $colorTags = array_map('trim', explode(',', $product['colourTags']));
-                foreach ($colorTags as $colorTag) {
-                    $tags[] = $colorTag;
-                    $variationColors[] = $colorTag;
-                }
-            }
-
-            if (!empty($product['collectionDocs'])) {
-                foreach ($product['collectionDocs'] as $collection) {
-                    if (!empty($collection['name'])) {
-                        $tags[] = trim($collection['name']);
-                    }
-                }
-            }
-
-            // Add category and subcategory as tags
-            if (!empty($product['category'])) {
-                $tags[] = $product['category'];
-            }
-            if (!empty($product['subCategory'])) {
-                $tags[] = $product['subCategory'];
-            }
-
-
-            $price = $product['regularPrice'] ?? '0.00';
-            $compareAtPrice = null;
-
-            if (!empty($product['sellingPrice']) && $product['regularPrice'] > $product['sellingPrice']) {
-                $price = $product['sellingPrice'];
-                $compareAtPrice = $product['regularPrice'];
-            } else {
-                $price = $product['regularPrice'] ?? '0.00';
-                $compareAtPrice = null; // No sale
-            }
-
-
-            $size = $product['size'];
-            $nominalSize = $this->convertSizeToNominal($size);
-
-            if (!empty($shapeTags)) {
-                $shapeTags = array_map('ucfirst', $shapeTags); // Capitalize first letter of each tag
-                $nominalSize .= ' ' . implode(' ', $shapeTags);
-            }
-
-            // Get prices from your API response
-            $regularPrice = $product['regularPrice'] ?? null;    // Original/normal price
-            $sellingPrice = $product['sellingPrice'] ?? null;    // Sale/discounted price
-
-            $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
-
-            // Build variants
-            $variants = [];
-            if (isset($variationColors) && !empty($variationColors)) {
-                foreach ($variationColors as $color) {
-                    // Create variant data first
-                    $variantData = [
-                        "option1" => $size,
-                        "option2" => $color,
-                        "option3" => $nominalSize,
-                        "price" => $currentPrice,
-                        'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                        'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
-                        'sku' => $product['ID'] ?? '',
-                        "requires_shipping" => true,
-                        "taxable" => true,
-                        "fulfillment_service" => "manual",
-                        "grams" => $product['weight_grams'] ?? 0,
-                    ];
-
-                    // Only add compare_at_price if product is on sale
-                    if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                        $variantData['compare_at_price'] = $regularPrice;
-                    }
-
-                    // Add to variants array ONCE
-                    $variants[] = $variantData;
-                }
-            } else {
-                // If no colors, create a single variant
-                $variantData = [
-                    "option1" => $size,
-                    "option2" => 'Default',
-                    "option3" => $nominalSize,
-                    "price" => $currentPrice,
-                    'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                    'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
-                    'sku' => $product['ID'] ?? '',
-                    "requires_shipping" => true,
-                    "taxable" => true,
-                    "fulfillment_service" => "manual",
-                    "grams" => $product['weight_grams'] ?? 0,
-                ];
-
-                // Only add compare_at_price if product is on sale
-                if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                    $variantData['compare_at_price'] = $regularPrice;
-                }
-
-                $variants[] = $variantData;
-            }
-
-
-            $updatedTitle = $product['title'] . ' #' . $product['ID'];
-
-            if (isset($size) && $size != '') {
-                $updatedTitle = $size . ' ' . $updatedTitle;
-            }
-
-
-            $shopifyProduct = [
-                "product" => [
-                    'title' => $updatedTitle ?? 'No Title',
-                    'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
-                    'vendor' => 'Oriental Rug Mart',
-                    'category' => 'Home & Garden > Decor > Rug',
-                    //'product_type' => $this->getProductType($product['product_category'] ?? ''),
-                    'product_type' => isset($product['constructionType']) && $product['constructionType'] !== '' ? ucfirst($product['constructionType']) : '',
-                    "options" => [
-                        ["name" => "Size", "values" => [$size]],
-                        ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
-                        ["name" => "Nominal Size", "values" => [$nominalSize]],
-                    ],
-                    'images' => [],
-                    'tags' => implode(', ', array_unique($tags)),
-                    "variants" => $variants,
-                    'gift_card' => false,
-                ]
-            ];
-
-            // Add the first image as the featured image
-
-            if (!empty($product['images'])) {
-                $shopifyProduct['product']['images'] = array_map(function ($imgUrl, $i) {
-                    return [
-                        'src' => $imgUrl,
-                        'position' => $i + 1,
-                    ];
-                }, $product['images'], array_keys($product['images']));
-            }
-
-            // Add dimensions as metafields
-            // if (!empty($product['dimension'])) {
-            //     $shopifyProduct['product']['metafields'] = [
-            //         [
-            //             'namespace' => 'custom',
-            //             'key' => 'length',
-            //             'value' => $product['dimension']['length'] ?? '',
-            //             'type' => 'single_line_text_field'
-            //         ],
-            //         [
-            //             'namespace' => 'custom',
-            //             'key' => 'width',
-            //             'value' => $product['dimension']['width'] ?? '',
-            //             'type' => 'single_line_text_field'
-            //         ],
-            //         [
-            //             'namespace' => 'custom',
-            //             'key' => 'height',
-            //             'value' => $product['dimension']['height'] ?? '',
-            //             'type' => 'single_line_text_field'
-            //         ]
-            //     ];
-            // }
-
-
-            // Add all other custom fields as metafields
-            // $metaFields = [
-            //     'sizeCategoryTags' => 'size_category_tags',
-            //     'costType' => 'cost_type',
-            //     'cost' => 'cost',
-            //     'condition' => 'condition',
-            //     'productType' => 'product_type',
-            //     'rugType' => 'rug_type',
-            //     'constructionType' => 'construction_type',
-            //     'country' => 'country',
-            //     'production' => 'production',
-            //     'primaryMaterial' => 'primary_material',
-            //     'design' => 'design',
-            //     'palette' => 'palette',
-            //     'pattern' => 'pattern',
-            //     'pile' => 'pile',
-            //     'period' => 'period',
-            //     'styleTags' => 'style_tags',
-            //     'otherTags' => 'other_tags',
-            //     'colourTags' => 'color_tags',
-            //     'foundation' => 'foundation',
-            //     'age' => 'age',
-            //     'quality' => 'quality',
-            //     'conditionNotes' => 'condition_notes',
-            //     'region' => 'region',
-            //     'density' => 'density',
-            //     'knots' => 'knots',
-            //     'rugID' => 'rug_id',
-            //     'size' => 'size',
-            //     'isTaxable' => 'is_taxable',
-            //     'subCategory' => 'subcategory',
-            //     'created_at' => 'created_at',
-            //     'updated_at' => 'updated_at',
-            //     'consignmentisActive' => 'consignment_active',
-            //     'consignorRef' => 'consignor_ref',
-            //     'parentId' => 'parent_id',
-            //     'agreedLowPrice' => 'agreed_low_price',
-            //     'agreedHighPrice' => 'agreed_high_price',
-            //     'payoutPercentage' => 'payout_percentage'
-            // ];
-
-            // foreach ($metaFields as $field => $key) {
-            //     if (!empty($product[$field])) {
-            //         $shopifyProduct['product']['metafields'][] = [
-            //             'namespace' => 'custom',
-            //             'key' => $key,
-            //             'value' => $product[$field],
-            //             'type' => 'single_line_text_field' // Now always string since we pre-formatted the data
-            //         ];
-            //     }
-            // }
-
-            // Add cost per square data as metafields
-            // if (!empty($product['costPerSquare'])) {
-            //     if (!empty($product['costPerSquare']['foot'])) {
-            //         $shopifyProduct['product']['metafields'][] = [
-            //             'namespace' => 'custom',
-            //             'key' => 'cost_per_square_foot',
-            //             'value' => $product['costPerSquare']['foot'],
-            //             'type' => 'single_line_text_field'
-            //         ];
-            //     }
-            //     if (!empty($product['costPerSquare']['meter'])) {
-            //         $shopifyProduct['product']['metafields'][] = [
-            //             'namespace' => 'custom',
-            //             'key' => 'cost_per_square_meter',
-            //             'value' => $product['costPerSquare']['meter'],
-            //             'type' => 'single_line_text_field'
-            //         ];
-            //     }
-            // }
-
-
-            $metafields = [
-                ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
-                ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
-                ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
-                ['namespace' => 'custom', 'key' => 'packageheight',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
-                ['namespace' => 'custom', 'key' => 'packagelength',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
-                ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
-            ];
-
-
-            // $allDefinitions = Http::withHeaders([
-            //     'X-Shopify-Access-Token' => $settings->shopify_token,
-            //     'Content-Type' => 'application/json',
-            // ])->timeout(3600)->get("https://{$shopifyDomain}/admin/api/2025-07/metafield_definitions.json", [
-            //     'owner_type' => 'PRODUCT'
-            // ])->json('metafield_definitions');
-
-
-            // foreach ($metafields as $field) {
-
-            //     $exists = collect($allDefinitions)->first(function ($def) use ($field) {
-            //         return $def['namespace'] === $field['namespace'] && $def['key'] === $field['key'];
-            //     });
-
-            //     if (!$exists) {
-            //         $create = Http::withHeaders([
-            //             'X-Shopify-Access-Token' => $settings->shopify_token,
-            //             'Content-Type' => 'application/json',
-            //         ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/metafield_definitions.json", [
-            //             'metafield_definition' => [
-            //                 'name' => ucfirst($field['key']),
-            //                 'namespace' => $field['namespace'],
-            //                 'key' => $field['key'],
-            //                 'type' => $field['type'],
-            //                 'description' => 'Custom product metafield',
-            //                 'owner_type' => 'PRODUCT',
-            //                 'owner_resource' => 'product'
-            //             ]
-            //         ]);
-
-            //         if ($create->failed()) {
-
-            //             $status = $create->status();
-            //             $responseBody = $create->body();
-
-
-
-            //             $message = "❌ Metafield definition creation failed for {$field['key']} (Status: {$status}) - {$responseBody}";
-
-            //             if (request()->has('stream')) {
-            //                 $sendMessage([
-            //                     'progress' => $progress,
-            //                     'message' => $message,
-            //                     'type' => 'progress',
-            //                     'success' => false
-            //                 ]);
-            //             }
-            //         }
-            //     }
-            // }
-
-            // Get existing metafields for this product
-
-
-            // save renrtal product price
-            $rental_price_data = $product['rental_price_value'];
-            // Case 1: General Price Format
-            $rentalPrice = '';
-            if (isset($rental_price_data['key']) && $rental_price_data['key'] === 'general_price') {
-                $rentalPrice = $rental_price_data['value'];
-            } elseif (isset($rental_price_data['redq_day_ranges_cost']) && is_array($rental_price_data['redq_day_ranges_cost'])) { // Case 2: Day Range Pricing Format
-                foreach ($rental_price_data['redq_day_ranges_cost'] as $range) {
-                    if (!empty($range['range_cost'])) {
-                        $rentalPrice = $range['range_cost'];
-                    }
-                }
-            }
-
-            if (!empty($rentalPrice)) {
-                $shopifyProduct['product']['metafields'][] = [
-                    'namespace' => 'custom',
-                    'key' => 'rental_price',
-                    'value' => $rentalPrice,
-                    'type' => 'single_line_text_field'
-                ];
-            }
-
-            //dd($shopifyProduct);
+            $logFileName = 'import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
+            $logFilePath = $logDir . '/' . $logFileName;
+
+            // === Helper: Stream + File Log ===
+            $sendMessage = function (array $data) use ($logFilePath) {
+                $timestamp = now()->format('Y-m-d H:i:s');
+                $message = $data['message'] ?? '';
+                $type = strtoupper($data['type'] ?? 'INFO');
+
+                // Write to file
+                $logLine = "[$timestamp][$type] $message";
+                file_put_contents($logFilePath, $logLine . PHP_EOL, FILE_APPEND);
+
+                // Send to client (SSE)
+                $data['timestamp'] = $timestamp;
+                echo "data: " . json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n\n";
+                @ob_flush();
+                @flush();
+            };
 
             try {
-                // First create the product
-                $response = Http::withHeaders([
-                    'X-Shopify-Access-Token' => $settings->shopify_token,
-                    'Content-Type' => 'application/json',
-                ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
 
-                //dd($response->json());
+                $sendMessage(['type' => 'info', 'message' => 'Starting product import...']);
 
-                if ($response->successful()) {
-                    $productData = $response->json();
-                    $productId = $productData['product']['id'] ?? null;
+                $logs = [];
+                $successCount = 0;
+                $failCount = 0;
+                $skippedCount = 0;
 
-                    if ($productId) {
-                        // Now add metafields (Shopify sometimes has issues with creating them in the same request)
-                        //$metafields = $shopifyProduct['product']['metafields'] ?? [];
-                        foreach ($metafields as $metafield) {
-                            Http::withHeaders([
-                                'X-Shopify-Access-Token' => $settings->shopify_token,
-                                'Content-Type' => 'application/json',
-                            ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
-                                'metafield' => $metafield
-                            ]);
-                        }
 
-                        // Now add the product to collections based on tags
-                        $uniqueTags = array_unique($tags);
+                if (!$settings || !$settings->api_key) {
+                    $sendMessage(['type' => 'error', 'message' => 'API key not found. Please configure your client settings.']);
+                    return;
+                }
 
-                        foreach ($uniqueTags as $tagName) {
-                            // Check if collection exists
-                            $existingCollection = Http::withHeaders([
-                                'X-Shopify-Access-Token' => $settings->shopify_token,
-                            ])->timeout(3600)->get("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
-                                'title' => $tagName
-                            ]);
+                // === Token Handling ===
+                $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
 
-                            $collectionId = null;
+                if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
+                    // Request a new token
+                    $tokenResponse = Http::withHeaders([
+                        'Content-Type' => 'application/json',
+                        'Accept' => 'application/json',
+                        'x-api-key' => $settings->api_key,
+                    ])->timeout(3600)->post('https://plugin-api.rugsimple.com/api/token');
 
-                            if ($existingCollection->successful() && !empty($existingCollection['custom_collections'])) {
-                                $collectionId = $existingCollection['custom_collections'][0]['id'];
-                            } else {
-                                // Create the collection
-                                $createCollection = Http::withHeaders([
-                                    'X-Shopify-Access-Token' => $settings->shopify_token,
-                                    'Content-Type' => 'application/json',
-                                ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
-                                    'custom_collection' => [
-                                        'title' => $tagName,
-                                        'body_html' => '<p>' . $tagName . ' collection</p>',
-                                        'published' => true
-                                    ]
-                                ]);
+                    if (!$tokenResponse->successful() || !isset($tokenResponse['token'])) {
 
-                                if ($createCollection->successful()) {
-                                    $collectionId = $createCollection['custom_collection']['id'];
-                                }
-                            }
-
-                            // Assign product to collection
-                            if ($collectionId) {
-                                Http::withHeaders([
-                                    'X-Shopify-Access-Token' => $settings->shopify_token,
-                                    'Content-Type' => 'application/json',
-                                ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/collects.json", [
-                                    'collect' => [
-                                        'product_id' => $productId,
-                                        'collection_id' => $collectionId
-                                    ]
-                                ]);
-                            }
-                        }
-
-                        $logs[] = ['message' => '✅ Imported: ' . ($product['title'] ?? 'Untitled'), 'success' => true];
-                        $message = '✅ Imported: ' . ($product['title'] ?? 'Untitled');
-                        if (request()->has('stream')) {
-                            $sendMessage([
-                                'progress' => $progress,
-                                'message' => $message,
-                                'type' => 'progress',
-                                'success' => true
-                            ]);
-                        }
-                        $successCount++;
+                        $sendMessage(['type' => 'error', 'message' => 'Failed to get token for this shop.']);
+                        return;
                     }
+
+                    // Save new token and expiry against the correct shop record
+                    $token = $tokenResponse['token'];
+                    $settings->update([
+                        'token' => $token,
+                        'token_expiry' => now()->addHours(3),
+                    ]);
+
+                    $sendMessage([
+                        'type' => 'info',
+                        'message' => 'New token generated successfully for shop: ' . $settings->shopify_store_url,
+                    ]);
                 } else {
-                    $logs[] = ['message' => '❌ Failed to import: ' . ($product['title'] ?? 'Untitled'), 'success' => false];
-                    $message = '❌ Failed to import: ' . ($product['title'] ?? 'Untitled') . ' - ' . $response->body();
-                    if (request()->has('stream')) {
+                    $token = $settings->token;
+                    $sendMessage([
+                        'type' => 'info',
+                        'message' => 'Using existing valid token for shop: ' . $settings->shopify_store_url,
+                    ]);
+                }
+
+
+                // === Get Products ===
+                $limit = $settings->product_limit ?? 10;
+                $skip = $settings->product_skip ?? 0;
+
+                $productResponse = Http::withHeaders([
+                    'Content-Type' => 'application/json',
+                    'Accept' => 'application/json',
+                    'Authorization' => 'Bearer ' . $token,
+                ])->timeout(3600)->get('https://plugin-api.rugsimple.com/api/rug', [
+                    'limit' => $limit,
+                    'skip' => $skip,
+                ]);
+
+                if (!$productResponse->successful()) {
+
+                    $sendMessage(['type' => 'error', 'message' => 'Failed to fetch products.']);
+                    return;
+                }
+
+                $responseData = $productResponse->json();
+                $products = $responseData['data'] ?? [];
+
+                if (!$settings->shopify_store_url || !$settings->shopify_token) {
+
+                    $sendMessage(['type' => 'error', 'message' => 'Shopify store URL or access token is missing.']);
+                    return;
+                }
+
+                $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+                $successCount = 0;
+                $skippedCount = 0;
+
+                // Process the product data
+                $processedProducts = $this->process_product_data($products);
+
+                $totalProducts = count($processedProducts);
+                $processed = 0;
+
+
+                foreach ($processedProducts as $index => $product) {
+
+                    $processed++;
+                    $progress = round((($index + 1) / $totalProducts) * 100);
+
+                    $title = $product['title'] ?? 'Untitled Product';
+
+                    $sendMessage([
+                        'type' => 'progress',
+                        'progress' => $progress,
+                        'message' => "Processing product " . ($index + 1) . "/{$totalProducts}: {$title}"
+                    ]);
+
+                    // Get the SKU we'll use to check for existing products
+                    $sku = $product['ID'] ?? null; // ID will be used for sku
+
+                    if (!$sku) {
+                        $logs[] = ['message' => '❌ Failed: Missing SKU.' . ($product['title'] ?? 'Untitled'), 'success' => false];
+                        $message = '❌ Failed: Missing SKU.' . ($product['title'] ?? 'Untitled');
+                        $failCount++;
+
                         $sendMessage([
                             'progress' => $progress,
                             'message' => $message,
                             'type' => 'progress',
                             'success' => false
                         ]);
+
+                        continue; // Skip products without a SKU
                     }
-                    $failCount++;
+
+                    if (empty($product['title'])) {
+                        $logs[] = ['message' => '❌ Failed: Missing Product Title. (' . $sku . ')  ', 'success' => false];
+                        $message = '❌ Failed: Missing Product Title. (' . $sku . ')';
+                        $failCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue; // Skip products without a SKU
+                    }
+
+                    if (empty($product['regularPrice'])) {
+                        $logs[] = ['message' => '❌ Failed: Missing Regular Price. (' . $sku . ')  ', 'success' => false];
+                        $message = '❌ Failed: Missing Regular Price. (' . $sku . ')';
+                        $failCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue; // Skip products without a regular Price
+                    }
+
+                    if (empty($product['product_category'])) {
+                        $logs[] = ['message' => '❌ Failed: Missing Product Category. Rental:Sale:Both (' . $sku . ')  ', 'success' => false];
+                        $message = '❌ Failed: Missing Product Category. Rental:Sale:Both (' . $sku . ')';
+                        $failCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue; // Skip products without a product category
+                    }
+
+                    if (empty($product['images'])) {
+                        $logs[] = ['message' => '❌ Failed: Missing Product Product Images. (' . $sku . ')  ', 'success' => false];
+                        $message = '❌ Failed: Missing Product Product Images. (' . $sku . ')';
+                        $failCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue; // Skip products without a product category
+                    }
+
+                    // Check if product already exists in Shopify
+                    $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
+
+                    if ($existingSkuProduct) {
+                        $logs[] = ['message' => '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
+                        $message = '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
+                        $skippedCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue;
+                    }
+
+                    // Check if product already exists in Shopify
+                    $existingTitleProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
+
+                    if ($existingTitleProduct) {
+                        $logs[] = ['message' => '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
+                        $message = '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
+                        $skippedCount++;
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        continue;
+                    }
+
+                    // Prepare tags array
+                    $tags = [];
+
+                    // Add product category tags
+                    if (!empty($product['product_category'])) {
+                        if ($product['product_category'] === 'both') {
+                            $tags[] = 'Rugs for Rent';
+                            $tags[] = 'Rugs for Sale';
+                        } elseif ($product['product_category'] === 'rental') {
+                            $tags[] = 'Rugs for Rent';
+                        } elseif ($product['product_category'] === 'sale') {
+                            $tags[] = 'Rugs for Sale';
+                        }
+                    }
+
+                    // Add other tags from WordPress taxonomies
+                    $tagFields = [
+                        //'condition',
+                        'constructionType',
+                        'country',
+                        //'production',
+                        'primaryMaterial',
+                        'design',
+                        'palette',
+                        'pattern',
+                        //'pile',
+                        //'period',
+                        'styleTags',
+                        //'otherTags',
+                        'foundation',
+                        //'age',
+                        //'quality',
+                        'region',
+                        //'density',
+                        //'knots',
+                        'rugType',
+                        'productType'
+                    ];
+
+                    foreach ($tagFields as $field) {
+                        if (!empty($product[$field])) {
+                            // Check if the field is a comma-separated string
+                            if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
+                                // Split the comma-separated string and add each value as a tag
+                                $values = array_map('trim', explode(',', $product[$field]));
+                                foreach ($values as $value) {
+                                    $tags[] = $value;
+                                }
+                            } else {
+                                // Add the single value as a tag
+                                $tags[] = $product[$field];
+                            }
+                        }
+                    }
+
+                    // Add size category tags (already processed as comma-separated string)
+                    if (!empty($product['sizeCategoryTags'])) {
+                        $sizeTags = array_map('trim', explode(',', $product['sizeCategoryTags']));
+                        foreach ($sizeTags as $sizeTag) {
+                            $tags[] = $sizeTag;
+                        }
+                    }
+
+                    // Add shape category tags (already processed as comma-separated string)
+                    $shapeTags = [];
+                    if (!empty($product['shapeCategoryTags'])) {
+                        $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
+                        foreach ($shapeTags as $shapeTag) {
+                            $tags[] = $shapeTag;
+                        }
+                    }
+
+                    // Add color tags (already processed as comma-separated string)
+                    $variationColors = [];
+                    if (!empty($product['colourTags'])) {
+                        $colorTags = array_map('trim', explode(',', $product['colourTags']));
+                        foreach ($colorTags as $colorTag) {
+                            $tags[] = $colorTag;
+                            $variationColors[] = $colorTag;
+                        }
+                    }
+
+                    if (!empty($product['collectionDocs'])) {
+                        foreach ($product['collectionDocs'] as $collection) {
+                            if (!empty($collection['name'])) {
+                                $tags[] = trim($collection['name']);
+                            }
+                        }
+                    }
+
+                    // Add category and subcategory as tags
+                    if (!empty($product['category'])) {
+                        $tags[] = $product['category'];
+                    }
+                    if (!empty($product['subCategory'])) {
+                        $tags[] = $product['subCategory'];
+                    }
+
+
+                    $price = $product['regularPrice'] ?? '0.00';
+                    $compareAtPrice = null;
+
+                    if (!empty($product['sellingPrice']) && $product['regularPrice'] > $product['sellingPrice']) {
+                        $price = $product['sellingPrice'];
+                        $compareAtPrice = $product['regularPrice'];
+                    } else {
+                        $price = $product['regularPrice'] ?? '0.00';
+                        $compareAtPrice = null; // No sale
+                    }
+
+
+                    $size = $product['size'];
+                    $nominalSize = $this->convertSizeToNominal($size);
+
+                    if (!empty($shapeTags)) {
+                        $shapeTags = array_map('ucfirst', $shapeTags); // Capitalize first letter of each tag
+                        $nominalSize .= ' ' . implode(' ', $shapeTags);
+                    }
+
+                    // Get prices from your API response
+                    $regularPrice = $product['regularPrice'] ?? null;    // Original/normal price
+                    $sellingPrice = $product['sellingPrice'] ?? null;    // Sale/discounted price
+
+                    $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
+
+                    // Build variants
+                    $variants = [];
+                    if (isset($variationColors) && !empty($variationColors)) {
+                        foreach ($variationColors as $color) {
+                            // Create variant data first
+                            $variantData = [
+                                "option1" => $size,
+                                "option2" => $color,
+                                "option3" => $nominalSize,
+                                "price" => $currentPrice,
+                                'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                                'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                                'sku' => $product['ID'] ?? '',
+                                "requires_shipping" => true,
+                                "taxable" => true,
+                                "fulfillment_service" => "manual",
+                                "grams" => $product['weight_grams'] ?? 0,
+                            ];
+
+                            // Only add compare_at_price if product is on sale
+                            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                                $variantData['compare_at_price'] = $regularPrice;
+                            }
+
+                            // Add to variants array ONCE
+                            $variants[] = $variantData;
+                        }
+                    } else {
+                        // If no colors, create a single variant
+                        $variantData = [
+                            "option1" => $size,
+                            "option2" => 'Default',
+                            "option3" => $nominalSize,
+                            "price" => $currentPrice,
+                            'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                            'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                            'sku' => $product['ID'] ?? '',
+                            "requires_shipping" => true,
+                            "taxable" => true,
+                            "fulfillment_service" => "manual",
+                            "grams" => $product['weight_grams'] ?? 0,
+                        ];
+
+                        // Only add compare_at_price if product is on sale
+                        if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                            $variantData['compare_at_price'] = $regularPrice;
+                        }
+
+                        $variants[] = $variantData;
+                    }
+
+
+                    $updatedTitle = $product['title'] . ' #' . $product['ID'];
+
+                    if (isset($size) && $size != '') {
+                        $updatedTitle = $size . ' ' . $updatedTitle;
+                    }
+
+
+                    $shopifyProduct = [
+                        "product" => [
+                            'title' => $updatedTitle ?? 'No Title',
+                            'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
+                            'vendor' => 'Oriental Rug Mart',
+                            'category' => 'Home & Garden > Decor > Rug',
+                            //'product_type' => $this->getProductType($product['product_category'] ?? ''),
+                            'product_type' => isset($product['constructionType']) && $product['constructionType'] !== '' ? ucfirst($product['constructionType']) : '',
+                            "options" => [
+                                ["name" => "Size", "values" => [$size]],
+                                ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
+                                ["name" => "Nominal Size", "values" => [$nominalSize]],
+                            ],
+                            'images' => [],
+                            'tags' => implode(', ', array_unique($tags)),
+                            "variants" => $variants,
+                            'gift_card' => false,
+                        ]
+                    ];
+
+                    // Add the first image as the featured image
+
+                    if (!empty($product['images'])) {
+                        $shopifyProduct['product']['images'] = array_map(function ($imgUrl, $i) {
+                            return [
+                                'src' => $imgUrl,
+                                'position' => $i + 1,
+                            ];
+                        }, $product['images'], array_keys($product['images']));
+                    }
+
+
+
+                    $metafields = [
+                        ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
+                        ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
+                        ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
+                        ['namespace' => 'custom', 'key' => 'packageheight',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
+                        ['namespace' => 'custom', 'key' => 'packagelength',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
+                        ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
+                    ];
+
+                    // Get existing metafields for this product
+
+
+                    // save renrtal product price
+                    $rental_price_data = $product['rental_price_value'];
+                    // Case 1: General Price Format
+                    $rentalPrice = '';
+                    if (isset($rental_price_data['key']) && $rental_price_data['key'] === 'general_price') {
+                        $rentalPrice = $rental_price_data['value'];
+                    } elseif (isset($rental_price_data['redq_day_ranges_cost']) && is_array($rental_price_data['redq_day_ranges_cost'])) { // Case 2: Day Range Pricing Format
+                        foreach ($rental_price_data['redq_day_ranges_cost'] as $range) {
+                            if (!empty($range['range_cost'])) {
+                                $rentalPrice = $range['range_cost'];
+                            }
+                        }
+                    }
+
+                    if (!empty($rentalPrice)) {
+                        $shopifyProduct['product']['metafields'][] = [
+                            'namespace' => 'custom',
+                            'key' => 'rental_price',
+                            'value' => $rentalPrice,
+                            'type' => 'single_line_text_field'
+                        ];
+                    }
+
+                    try {
+                        // First create the product
+                        $response = Http::withHeaders([
+                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                            'Content-Type' => 'application/json',
+                        ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
+
+
+                        if ($response->successful()) {
+                            $productData = $response->json();
+                            $productId = $productData['product']['id'] ?? null;
+
+                            if ($productId) {
+                                // Now add metafields (Shopify sometimes has issues with creating them in the same request)
+
+                                foreach ($metafields as $metafield) {
+                                    Http::withHeaders([
+                                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                                        'Content-Type' => 'application/json',
+                                    ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                                        'metafield' => $metafield
+                                    ]);
+                                }
+
+                                // Now add the product to collections based on tags
+                                $uniqueTags = array_unique($tags);
+
+                                foreach ($uniqueTags as $tagName) {
+                                    // Check if collection exists
+                                    $existingCollection = Http::withHeaders([
+                                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    ])->timeout(3600)->get("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
+                                        'title' => $tagName
+                                    ]);
+
+                                    $collectionId = null;
+
+                                    if ($existingCollection->successful() && !empty($existingCollection['custom_collections'])) {
+                                        $collectionId = $existingCollection['custom_collections'][0]['id'];
+                                    } else {
+                                        // Create the collection
+                                        $createCollection = Http::withHeaders([
+                                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                                            'Content-Type' => 'application/json',
+                                        ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
+                                            'custom_collection' => [
+                                                'title' => $tagName,
+                                                'body_html' => '<p>' . $tagName . ' collection</p>',
+                                                'published' => true
+                                            ]
+                                        ]);
+
+                                        if ($createCollection->successful()) {
+                                            $collectionId = $createCollection['custom_collection']['id'];
+                                        }
+                                    }
+
+                                    // Assign product to collection
+                                    if ($collectionId) {
+                                        Http::withHeaders([
+                                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                                            'Content-Type' => 'application/json',
+                                        ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/collects.json", [
+                                            'collect' => [
+                                                'product_id' => $productId,
+                                                'collection_id' => $collectionId
+                                            ]
+                                        ]);
+                                    }
+                                }
+
+                                $logs[] = ['message' => '✅ Imported: ' . ($product['title'] ?? 'Untitled'), 'success' => true];
+                                $message = '✅ Imported: ' . ($product['title'] ?? 'Untitled');
+
+                                $sendMessage([
+                                    'progress' => $progress,
+                                    'message' => $message,
+                                    'type' => 'progress',
+                                    'success' => true
+                                ]);
+
+                                $successCount++;
+                            }
+                        } else {
+                            $logs[] = ['message' => '❌ Failed to import: ' . ($product['title'] ?? 'Untitled'), 'success' => false];
+                            $message = '❌ Failed to import: ' . ($product['title'] ?? 'Untitled') . ' - ' . $response->body();
+
+                            $sendMessage([
+                                'progress' => $progress,
+                                'message' => $message,
+                                'type' => 'progress',
+                                'success' => false
+                            ]);
+
+                            $failCount++;
+                        }
+                    } catch (\Exception $e) {
+                        //\Log::error('Exception inserting product to Shopify: ' . $e->getMessage());
+                        $logs[] = ['message' => '❌ Exception: ' . ($product['title'] ?? 'Untitled') . ' - ' . $e->getMessage(), 'success' => false];
+                        $message = '❌ Exception: ' . ($product['title'] ?? 'Untitled') . ' - ' . $e->getMessage();
+
+                        $sendMessage([
+                            'progress' => $progress,
+                            'message' => $message,
+                            'type' => 'progress',
+                            'success' => false
+                        ]);
+
+                        $failCount++;
+                        continue;
+                    }
                 }
-            } catch (\Exception $e) {
-                //\Log::error('Exception inserting product to Shopify: ' . $e->getMessage());
-                $logs[] = ['message' => '❌ Exception: ' . ($product['title'] ?? 'Untitled') . ' - ' . $e->getMessage(), 'success' => false];
-                $message = '❌ Exception: ' . ($product['title'] ?? 'Untitled') . ' - ' . $e->getMessage();
-                if (request()->has('stream')) {
-                    $sendMessage([
-                        'progress' => $progress,
-                        'message' => $message,
-                        'type' => 'progress',
-                        'success' => false
-                    ]);
-                }
-                $failCount++;
-                continue;
+
+                // === Complete ===
+                $sendMessage([
+                    'type' => 'complete',
+                    'progress' => 100,
+                    'message' => "Import completed successfully!",
+                    'success_count' => $successCount,
+                    'failure_count' => $failCount,
+                    'skipped_count' => $skippedCount,
+                ]);
+
+                $sendMessage(['type' => 'info', 'message' => "Logs saved in {$logFilePath}"]);
+
+                echo "event: done\n";
+                echo "data: [DONE]\n\n";
+                @ob_flush();
+                @flush();
+            } catch (\Throwable $e) {
+                $sendMessage(['type' => 'error', 'message' => 'Unexpected error: ' . $e->getMessage()]);
             }
+        });
 
-            // Send progress update
-            // $sendMessage([
-            //     'progress' => $progress,
-            //     'message' => 'Processing: ' . ($product['title'] ?? 'Unknown'),
-            //     'type' => 'progress'
-            // ]);
-        }
+        // === Required SSE headers ===
+        $response->headers->set('Content-Type', 'text/event-stream');
+        $response->headers->set('Cache-Control', 'no-cache');
+        $response->headers->set('Connection', 'keep-alive');
+        $response->headers->set('X-Accel-Buffering', 'no');
 
-        $message = "{$successCount} product(s) imported to Shopify.";
-        if ($skippedCount > 0) {
-            $message .= " {$skippedCount} existing product(s) skipped.";
-        }
-
-        //return back()->with('success', $message);
-
-        if (request()->has('stream')) {
-            $sendMessage([
-                'progress' => 100,
-                'message' => 'Import complete!',
-                'type' => 'complete',
-                'success_count' => $successCount,
-                'failure_count' => $failCount,
-                'skipped_count' => $skippedCount,
-                'logs' => $logs
-            ]);
-            exit;
-        }
-
-        return response()->json([
-            // 'success_count' => $successCount,
-            // 'failure_count' => $failCount,
-            // 'skipped_count' => $skippedCount,
-            // 'logs' => $logs,
-            //'progress' => 100,
-            //'message' => 'Import complete!',
-            'success_count' => $successCount,
-            'failure_count' => $failCount,
-            'skipped_count' => $skippedCount,
-            'logs' => $logs,
-        ]);
-
-        //return back()->with('success', "{$successCount} product(s) imported to Shopify.");
+        return $response;
     }
 
     function convertSizeToNominal($sizeString)
@@ -1546,30 +1268,30 @@ class SettingsController extends Controller
     /**
      * Check if a product already exists in Shopify by SKU
      */
-    // private function checkProductExists($settings, $shopifyDomain, $sku)
-    // {
-    //     try {
-    //         $response = Http::withHeaders([
-    //             'X-Shopify-Access-Token' => $settings->shopify_token,
-    //             'Content-Type' => 'application/json',
-    //         ])->get("https://{$shopifyDomain}/admin/api/2025-07/products.json?sku={$sku}", [
-    //             'limit' => 1
-    //         ]);
-    //         echo '('.$sku.')';
-    //         echo "https://{$shopifyDomain}/admin/api/2025-07/products.json?sku={$sku}";
-    //         if ($response->successful()) {
-    //             $products = $response->json()['products'] ?? [];
+    private function checkProductExists($settings, $shopifyDomain, $sku)
+    {
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $settings->shopify_token,
+                'Content-Type' => 'application/json',
+            ])->get("https://{$shopifyDomain}/admin/api/2025-07/products.json?sku={$sku}", [
+                'limit' => 1
+            ]);
+            echo '(' . $sku . ')';
+            echo "https://{$shopifyDomain}/admin/api/2025-07/products.json?sku={$sku}";
+            if ($response->successful()) {
+                $products = $response->json()['products'] ?? [];
 
-    //             print_r($products);
-    //             return count($products) > 0;
-    //         }
-    //     } catch (\Exception $e) {
-    //         // If there's an error checking, assume product doesn't exist
-    //         return false;
-    //     }
+                print_r($products);
+                return count($products) > 0;
+            }
+        } catch (\Exception $e) {
+            // If there's an error checking, assume product doesn't exist
+            return false;
+        }
 
-    //     return false;
-    // }
+        return false;
+    }
 
     private function checkProductBySkuOrTitle($settings, $shopifyDomain, $value = null, $action = 'title')
     {

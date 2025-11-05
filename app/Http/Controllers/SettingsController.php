@@ -1042,7 +1042,17 @@ class SettingsController extends Controller
 
 
 
+                    // $metafields = [
+                    //     ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'packageheight',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'packagelength',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
+                    // ];
+
                     $metafields = [
+                        // Dimensions & Shipping Dimensions
                         ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
                         ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
                         ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
@@ -1051,10 +1061,61 @@ class SettingsController extends Controller
                         ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
                     ];
 
+                    // Additional metafields list
+                    $extraMetaFields = [
+                        'sizeCategoryTags'   => 'size_category_tags',
+                        'costType'           => 'cost_type',
+                        'cost'               => 'cost',
+                        'condition'          => 'condition',
+                        'productType'        => 'product_type',
+                        'rugType'            => 'rug_type',
+                        'constructionType'   => 'construction_type',
+                        'country'            => 'country',
+                        'production'         => 'production',
+                        'primaryMaterial'    => 'primary_material',
+                        'design'             => 'design',
+                        'palette'            => 'palette',
+                        'pattern'            => 'pattern',
+                        'pile'               => 'pile',
+                        'period'             => 'period',
+                        'styleTags'          => 'style_tags',
+                        'otherTags'          => 'other_tags',
+                        'colourTags'         => 'color_tags',
+                        'foundation'         => 'foundation',
+                        'age'                => 'age',
+                        'quality'            => 'quality',
+                        'conditionNotes'     => 'condition_notes',
+                        'region'             => 'region',
+                        'density'            => 'density',
+                        'knots'              => 'knots',
+                        'rugID'              => 'rug_id',
+                        'size'               => 'size',
+                        'isTaxable'          => 'is_taxable',
+                        'subCategory'        => 'subcategory',
+                        'created_at'         => 'created_at',
+                        'updated_at'         => 'updated_at',
+                        'consignmentisActive' => 'consignment_active',
+                        'consignorRef'       => 'consignor_ref',
+                        'parentId'           => 'parent_id',
+                        'agreedLowPrice'     => 'agreed_low_price',
+                        'agreedHighPrice'    => 'agreed_high_price',
+                        'payoutPercentage'   => 'payout_percentage'
+                    ];
+
+                    // Loop and merge extra metafields
+                    foreach ($extraMetaFields as $field => $key) {
+                        if (!empty($product[$field])) {
+                            $metafields[] = [
+                                'namespace' => 'custom',
+                                'key'       => $key,
+                                'type'      => 'single_line_text_field',
+                                'value'     => (string)$product[$field]
+                            ];
+                        }
+                    }
+
                     // Get existing metafields for this product
-
-
-                    // save renrtal product price
+                    // save rental product price
                     $rental_price_data = $product['rental_price_value'];
                     // Case 1: General Price Format
                     $rentalPrice = '';
@@ -1220,6 +1281,35 @@ class SettingsController extends Controller
         return $response;
     }
 
+    public function verifyToken()
+    {
+        $settings = Setting::firstOrCreate([]);
+
+        if (!$settings || !$settings->shopify_store_url || !$settings->shopify_token) {
+            return response()->json(['valid' => false, 'message' => 'No credentials found']);
+        }
+
+        $storeUrl = $settings->shopify_store_url;
+        $token = $settings->shopify_token;
+
+        try {
+            $url = "https://{$storeUrl}/admin/api/2024-01/shop.json";
+
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+            ])->get($url);
+
+            if ($response->successful()) {
+                return response()->json(['valid' => true]);
+            } else {
+                return response()->json(['valid' => false, 'message' => 'Invalid credentials']);
+            }
+        } catch (\Exception $e) {
+            return response()->json(['valid' => false, 'message' => 'Connection failed']);
+        }
+    }
+
     function convertSizeToNominal($sizeString)
     {
         if (empty(trim($sizeString))) {
@@ -1348,9 +1438,6 @@ class SettingsController extends Controller
 
         return false;
     }
-
-
-
 
     function process_product_data($products)
     {

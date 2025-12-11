@@ -1051,14 +1051,24 @@ class SettingsController extends Controller
                     //     ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
                     // ];
 
+                    // $metafields = [
+                    //     // Dimensions & Shipping Dimensions
+                    //     ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'package_height',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'package_length',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
+                    //     ['namespace' => 'custom', 'key' => 'package_width',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
+                    // ];
+
                     $metafields = [
-                        // Dimensions & Shipping Dimensions
-                        ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
-                        ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
-                        ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
-                        ['namespace' => 'custom', 'key' => 'packageheight',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
-                        ['namespace' => 'custom', 'key' => 'packagelength',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
-                        ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
+                        // Dimensions
+                        ['namespace' => 'custom', 'key' => 'height', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['height'] ?? 0), 'unit' => 'INCHES'])],
+                        ['namespace' => 'custom', 'key' => 'length', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['length'] ?? 0), 'unit' => 'INCHES'])],
+                        ['namespace' => 'custom', 'key' => 'width', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['width'] ?? 0), 'unit' => 'INCHES'])],
+                        ['namespace' => 'custom', 'key' => 'packageheight', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['height'] ?? 0), 'unit' => 'INCHES'])],
+                        ['namespace' => 'custom', 'key' => 'packagelength', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['length'] ?? 0), 'unit' => 'INCHES'])],
+                        ['namespace' => 'custom', 'key' => 'packagewidth', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['width'] ?? 0), 'unit' => 'INCHES'])],
                     ];
 
                     // Additional metafields list
@@ -1113,6 +1123,14 @@ class SettingsController extends Controller
                             ];
                         }
                     }
+
+                    // Sets the source value to identify products imported via the app
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key' => 'source',
+                        'type' => 'boolean',
+                        'value' => true
+                    ];
 
                     // Get existing metafields for this product
                     // save rental product price

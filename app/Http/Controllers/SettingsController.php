@@ -1114,13 +1114,11 @@ class SettingsController extends Controller
                         ['namespace' => 'custom', 'key' => 'height', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['height'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'length', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['length'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'width', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['width'] ?? 0), 'unit' => 'INCHES'])],
-
-                        // Shipping Dimensions
                         ['namespace' => 'custom', 'key' => 'packageheight', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['height'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'packagelength', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['length'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'packagewidth', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['width'] ?? 0), 'unit' => 'INCHES'])],
                     ];
-                    // Additional metafields list
+                    // Additional metafield list
                     $extraMetaFields = [
                         'sizeCategoryTags'   => 'size_category_tags',
                         'costType'           => 'cost_type',

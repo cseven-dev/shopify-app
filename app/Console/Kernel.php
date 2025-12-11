@@ -13,8 +13,8 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule): void
     {
         $schedule->command('import:daily')
-             ->dailyAt('00:00')  // Runs at midnight
-             ->timezone('America/Toronto');
+            ->dailyAt('00:00')  // Runs at midnight
+            ->timezone('America/Toronto');
     }
 
     /**

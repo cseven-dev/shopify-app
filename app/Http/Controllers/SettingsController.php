@@ -1026,6 +1026,7 @@ class SettingsController extends Controller
                             'tags' => implode(', ', array_unique($tags)),
                             "variants" => $variants,
                             'gift_card' => false,
+                            'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
                         ]
                     ];
 
@@ -1175,7 +1176,7 @@ class SettingsController extends Controller
                                     Http::withHeaders([
                                         'X-Shopify-Access-Token' => $settings->shopify_token,
                                         'Content-Type' => 'application/json',
-                                    ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                                    ])->timeout(3600)->retry(3, 1000)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
                                         'metafield' => $metafield
                                     ]);
                                 }
@@ -1401,7 +1402,7 @@ class SettingsController extends Controller
         return false;
     }
 
-    private function checkProductBySkuOrTitle($settings, $shopifyDomain, $value = null, $action = 'title')
+    public function checkProductBySkuOrTitle($settings, $shopifyDomain, $value = null, $action = 'title')
     {
         if (!$value || !in_array($action, ['sku', 'title'])) {
             return false; // Invalid usage
@@ -1464,6 +1465,22 @@ class SettingsController extends Controller
 
 
         foreach ($products as $product) {
+
+
+            // $allowed_ids = [
+            //     '002853',
+            //     '004892',
+            //     '010301',
+            //     '016390',
+            //     '017724',
+            //     '018196',
+            //     '018531',
+            //     '018608'
+            // ];
+
+            // if (!in_array((string) $product['ID'], $allowed_ids, true)) {
+            //     continue;
+            // }
 
 
             //if (empty($product['collectionDocs'])) {

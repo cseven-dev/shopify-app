@@ -8,19 +8,27 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Carbon;
 use App\Http\Controllers\SettingsController;
+use Illuminate\Support\Facades\Cache;
 
 class DailyImportCommand extends Command
 {
-    protected $signature = 'import:daily';
-    protected $description = 'Run daily product import at midnight - FULL IMPORT';
+    protected $signature = 'import:daily {--force-days=} {--force : Force update all products regardless of timestamps}';
+    protected $description = 'Run daily product import - Rug API as source of truth';
 
     private $logFilePath;
+    private $cronTrackingKey = 'daily_import_last_successful_run';
 
     public function handle()
     {
+        $this->log("
+╔══════════════════════════════════════════════════════════════╗");
+        $this->log("║              DAILY PRODUCT IMPORT STARTED                    ║");
+        $this->log("╚══════════════════════════════════════════════════════════════╝");
+        $this->log("Started at: " . now()->format('Y-m-d H:i:s'));
+
+        Log::info('Cron executed at: ' . now());
 
         try {
-            // Fetch all shop settings (assuming each shop has its own record)
             $shops = Setting::all();
 
             if ($shops->isEmpty()) {
@@ -28,16 +36,12 @@ class DailyImportCommand extends Command
             }
 
             foreach ($shops as $shop) {
-
-                // Initialize a shop-specific log file for this shop
                 $this->initLog($shop->shopify_store_url);
 
-                // if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
-                //     $this->log("Stop shop for processing: {$shop->shopify_store_url}");
-                //     continue;
-                // }
-
-                $this->log("🛍 Processing shop: {$shop->shopify_store_url}");
+                //if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
+                    //$this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
+                    //continue;
+                //}
 
                 if (!$shop->shopify_store_url || !$shop->api_key || !$shop->shopify_token) {
                     $this->log("⚠️ Skipping shop (missing credentials): {$shop->shopify_store_url}");
@@ -45,50 +49,36 @@ class DailyImportCommand extends Command
                 }
 
                 try {
-                    // 1. Fetch Shopify products
-                    $allProducts = $this->fetchAllShopifyProducts($shop);
-                    if (empty($allProducts)) {
-                        $this->log("❌ No products fetched from Shopify for {$shop->shopify_store_url}");
-                        continue;
-                    }
+                    $this->log("
+════════════════════════════════════════════════════════════════");
+                    $this->log("🏪 SHOP: {$shop->shopify_store_url}");
+                    $this->log("════════════════════════════════════════════════════════════════");
 
-                    // 2. Build SKU list & product map
-                    [$shopifyComparedProducts, $sku_list] = $this->buildSkuList($allProducts);
-                    if (empty($sku_list)) {
-                        $this->log("❌ No SKUs found for {$shop->shopify_store_url}");
-                        continue;
-                    }
+                    $this->processShop($shop);
 
-                    // 3. Get Rug API token
-                    $token = $this->getRugApiToken($shop);
-                    if (!$token) {
-                        $this->log("❌ Failed to get Rug API token for {$shop->shopify_store_url}");
-                        continue;
-                    }
-
-                    // 4. Fetch Rug products
-                    $shopifyFetchedProducts = $this->fetchRugProducts($token, $sku_list);
-                    if (empty($shopifyFetchedProducts)) {
-                        $this->log("❌ No product data received from Rug API for {$shop->shopify_store_url}");
-                        continue;
-                    }
-
-                    // 5. Process Rug data
-                    $settingsController = new SettingsController();
-                    $processedProducts = $settingsController->process_product_data($shopifyFetchedProducts);
-
-                    // 6. Compare & update
-                    $this->compareAndUpdateProducts($processedProducts, $shopifyComparedProducts, $shop);
-
-                    $this->log("✅ Cron completed successfully for {$shop->shopify_store_url}");
+                    $this->log("
+✅ Cron completed successfully for {$shop->shopify_store_url}");
                 } catch (\Exception $innerEx) {
                     $this->log("❌ Error processing {$shop->shopify_store_url}: " . $innerEx->getMessage());
+                    $this->log("   Stack trace: " . $innerEx->getTraceAsString());
+                    Log::error("Shop processing error", [
+                        'shop' => $shop->shopify_store_url,
+                        'error' => $innerEx->getMessage(),
+                        'trace' => $innerEx->getTraceAsString()
+                    ]);
                 }
 
                 $this->log("-------------------------------------------------------------");
             }
 
-            $this->log("🎉 All shop imports completed successfully.");
+            $this->markCronSuccess();
+
+            $this->log("
+╔══════════════════════════════════════════════════════════════╗");
+            $this->log("║          🎉 ALL SHOP IMPORTS COMPLETED SUCCESSFULLY          ║");
+            $this->log("╚══════════════════════════════════════════════════════════════╝");
+            $this->log("Completed at: " . now()->format('Y-m-d H:i:s'));
+
             return Command::SUCCESS;
         } catch (\Exception $e) {
             return $this->exceptionFail($e);
@@ -96,743 +86,931 @@ class DailyImportCommand extends Command
     }
 
     /**
-     * Initialize log file
+     * Process shop - Fetch from Rug API, then sync to Shopify
      */
-    private function initLog($shopUrl = null)
+    private function processShop($shop)
     {
-        // If a shop URL is provided, create a shop-specific folder
-        if (!empty($shopUrl)) {
-            $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shopUrl, PHP_URL_HOST) ?? $shopUrl);
-            $logDir = storage_path('logs/imports/' . $shopSlug);
-        } else {
-            // fallback into an 'unknown' directory (not a global master file)
-            $logDir = storage_path('logs/imports/unknown');
+        $settingsController = new SettingsController();
+
+        $stats = [
+            'total_rug_products' => 0,
+            'recently_updated' => 0,
+            'found_in_shopify' => 0,
+            'inserted' => 0,
+            'updated' => 0,
+            'unpublished' => 0,
+            'errors' => 0
+        ];
+
+        // Get days to look back
+        $daysToLookBack = $this->getDaysToLookBack($shop);
+        $this->log("📅 Looking back {$daysToLookBack} days for updated products");
+
+        $cutoffDate = Carbon::now()->subDays($daysToLookBack);
+        $this->log("📅 Cutoff Date: {$cutoffDate->toIso8601String()}");
+
+        // Get Rug API token
+        $token = $this->getRugApiToken($shop);
+        if (!$token) {
+            throw new \Exception("Failed to get Rug API token");
         }
 
-        if (!file_exists($logDir)) {
-            mkdir($logDir, 0777, true);
+        // Fetch all products from Rug API
+        $allRugProducts = $this->fetchAllRugProducts($token);
+        $stats['total_rug_products'] = count($allRugProducts);
+        $this->log("📦 Total products from Rug API: {$stats['total_rug_products']}");
+
+        if (empty($allRugProducts)) {
+            $this->log("⚠️ No products fetched from Rug API");
+            return;
         }
 
-        $logFileName = 'import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
-        $this->logFilePath = $logDir . '/' . $logFileName;
+        // Filter by date
+        $recentlyUpdatedProducts = $this->filterRugProductsByDate($allRugProducts, $cutoffDate);
+        $stats['recently_updated'] = count($recentlyUpdatedProducts);
+        $this->log("🔍 Products updated in last {$daysToLookBack} days: {$stats['recently_updated']}");
 
-        // write a header line to the shop log
-        $this->log("🟢 CRON STARTED at: " . now()->format('Y-m-d H:i:s'));
-    }
+        // Process products
+        $recentlyUpdatedProducts = $settingsController->process_product_data($recentlyUpdatedProducts);
 
-    /**
-     * Fetch all Shopify products with pagination
-     */
-    private function fetchAllShopifyProducts($settings)
-    {
-        $allProducts = [];
-        $nextPageInfo = null;
-        $limit = 250;
-        $pageCount = 1;
+        if (empty($recentlyUpdatedProducts)) {
+            $this->log("✓ No recently updated products to process");
+            return;
+        }
 
-        do {
-            $url = "https://{$settings->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
-            if ($nextPageInfo) {
-                $url .= "&page_info={$nextPageInfo}";
-            }
+        // Process in batches
+        $batchSize = 50;
+        $batches = array_chunk($recentlyUpdatedProducts, $batchSize);
+        $this->log("📋 Total SKUs to process: {$stats['recently_updated']} (in " . count($batches) . " batches)");
 
-            $this->log("📡 Fetching Shopify products page {$pageCount}...");
-            $response = Http::withHeaders([
-                'X-Shopify-Access-Token' => $settings->shopify_token,
-                'Content-Type' => 'application/json',
-            ])->timeout(3600)->get($url);
+        foreach ($batches as $batchNumber => $batch) {
+            $this->log("
+🔄 Processing batch " . ($batchNumber + 1) . "/" . count($batches) . " (" . count($batch) . " products)");
 
-            if (!$response->successful()) {
-                $this->log("❌ Shopify API failed with status " . $response->status());
-                break;
-            }
+            foreach ($batch as $rugProduct) {
+                $sku = $rugProduct['ID'] ?? '';
 
-            $products = $response->json('products');
-            if (empty($products)) {
-                $this->log("⚠️ No products found on page {$pageCount}.");
-                break;
-            }
-
-            $this->log("✅ Retrieved " . count($products) . " products from page {$pageCount}");
-
-            // Fetch metafields for each product
-            foreach ($products as &$product) {
-                $metafieldsUrl = "https://{$settings->shopify_store_url}/admin/api/2025-07/products/{$product['id']}/metafields.json";
-
-                $metafieldsResponse = Http::withHeaders([
-                    'X-Shopify-Access-Token' => $settings->shopify_token,
-                    'Content-Type' => 'application/json',
-                ])->get($metafieldsUrl);
-
-                if ($metafieldsResponse->successful()) {
-                    $metafields = $metafieldsResponse->json('metafields');
-                    $product['metafields'] = $metafields ?? [];
-                    $this->log("  ✅ Fetched " . count($product['metafields']) . " metafields for product ID: {$product['id']}");
-                } else {
-                    $product['metafields'] = [];
-                    //$this->log("  ⚠️ Failed to fetch metafields for product ID: {$product['id']}");
-                    $this->log("⚠️ Failed to fetch metafields for product ID: {$product['id']} | Status: " . $metafieldsResponse->status() . " | Response: " . $metafieldsResponse->body());
+                if (empty($sku)) {
+                    $this->log("⚠️ Skipping product with no SKU");
+                    $stats['errors']++;
+                    continue;
                 }
 
-                // Respect Shopify API rate limits (2 requests per second for REST Admin API)
-                usleep(500000); // 0.5 second delay between metafield requests
+                try {
+                    $this->log("
+📦 Processing SKU: {$sku}");
+
+                    // Check if product exists in Shopify
+                    $shopifyProduct = $this->getShopifyProductBySKU($shop, $sku);
+
+                    if (!$shopifyProduct) {
+                        // Product not found - insert new
+                        $this->log("   ⊘ Not found in Shopify - inserting new product");
+
+                        $inserted = $this->insertNewProduct($rugProduct, $shop->shopify_store_url);
+
+                        if ($inserted) {
+                            $this->log("   ✅ Successfully inserted");
+                            $stats['inserted']++;
+                        } else {
+                            $this->log("   ❌ Failed to insert");
+                            $stats['errors']++;
+                        }
+
+                        continue;
+                    }
+
+                    // Product found - update it
+                    $stats['found_in_shopify']++;
+                    $this->log("   ✅ Found in Shopify - Product ID: {$shopifyProduct['id']}");
+
+                    // Fetch metafields
+                    $metafields = $this->getShopifyProductMetafields($shop, $shopifyProduct['id']);
+                    $shopifyProduct['metafields'] = $metafields;
+
+                    // Find matching variant
+                    $variant = null;
+                    foreach ($shopifyProduct['variants'] as $v) {
+                        if ($v['sku'] === $sku) {
+                            $variant = $v;
+                            break;
+                        }
+                    }
+
+                    if (!$variant) {
+                        $this->log("   ⚠️ No variant found matching SKU {$sku}");
+                        $stats['errors']++;
+                        continue;
+                    }
+
+                    // Prepare shopify data
+                    $shopifyData = [
+                        'sku' => $sku,
+                        'product_id' => $shopifyProduct['id'],
+                        'variant_id' => $variant['id'],
+                        'title' => $shopifyProduct['title'],
+                        'metafields' => $metafields,
+                        'full_product' => $shopifyProduct,
+                    ];
+
+                    // Check if we should update (force mode or timestamp comparison)
+                    $forceUpdate = $this->option('force');
+                    $shouldUpdate = $forceUpdate;
+
+                    if (!$forceUpdate) {
+                        $metafieldUpdatedAt = null;
+                        foreach ($metafields as $metafield) {
+                            if ($metafield['namespace'] === 'custom' && $metafield['key'] === 'updated_at') {
+                                $metafieldUpdatedAt = $metafield['value'];
+                                break;
+                            }
+                        }
+
+                        if (empty($metafieldUpdatedAt)) {
+                            $shouldUpdate = true;
+                            $this->log("   ℹ️ No custom.updated_at - will update");
+                        } else {
+                            $rugTimestamp = strtotime($rugProduct['updated_at']);
+                            $shopifyTimestamp = strtotime($metafieldUpdatedAt);
+
+                            if ($rugTimestamp >= $shopifyTimestamp) {
+                                $shouldUpdate = true;
+                                $diff = $rugTimestamp - $shopifyTimestamp;
+                                $this->log("   🔄 Rug API is newer by {$diff}s - will update");
+                            } else {
+                                $this->log("   ⏭️ Shopify is newer - skipping");
+                            }
+                        }
+                    } else {
+                        $this->log("   🔨 FORCE MODE - updating");
+                    }
+
+                    if ($shouldUpdate) {
+                        $updated = $this->updateShopifyProduct($rugProduct, $shopifyData, $shop);
+
+                        if ($updated) {
+                            $stats['updated']++;
+
+                            // Handle publish/unpublish status
+                            $status = $rugProduct['status'] ?? '';
+                            $inventoryQty = $rugProduct['inventory']['quantityLevel'][0]['available'] ?? null;
+
+                            // Check inventory first - if 0, always unpublish
+                            if ($inventoryQty !== null && $inventoryQty <= 0) {
+                                $this->unpublishProduct($shop, $shopifyProduct['id']);
+                                $stats['unpublished']++;
+                                $this->log("   📴 Product unpublished (inventory: 0)");
+                            }
+                            // If inventory > 0, then check status field
+                            else if ($status === 'available') {
+                                $this->publishProduct($shop, $shopifyProduct['id']);
+                            } else {
+                                $this->unpublishProduct($shop, $shopifyProduct['id']);
+                                $stats['unpublished']++;
+                            }
+                        } else {
+                            $stats['errors']++;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    $this->log("   ❌ Error: " . $e->getMessage());
+                    $stats['errors']++;
+                }
+
+                usleep(500000); // Rate limiting
             }
+        }
 
-            $allProducts = array_merge($allProducts, $products);
-
-            $linkHeader = $response->header('Link');
-            if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
-                $nextPageInfo = $matches[1];
-                $pageCount++;
-            } else {
-                $nextPageInfo = null;
-            }
-        } while ($nextPageInfo);
-
-        $this->log("🎉 Total products imported: " . count($allProducts));
-        return $allProducts;
+        // Final summary
+        $this->log("
+╔══════════════════════════════════════════════════════════════╗");
+        $this->log("║                  PROCESSING SUMMARY                          ║");
+        $this->log("╚══════════════════════════════════════════════════════════════╝");
+        $this->log("📊 Total Rug API products: {$stats['total_rug_products']}");
+        $this->log("📊 Recently updated: {$stats['recently_updated']}");
+        $this->log("✅ Found in Shopify: {$stats['found_in_shopify']}");
+        $this->log("➕ Inserted (new): {$stats['inserted']}");
+        $this->log("🔄 Updated: {$stats['updated']}");
+        $this->log("📴 Unpublished: {$stats['unpublished']}");
+        $this->log("❌ Errors: {$stats['errors']}");
+        $this->log("════════════════════════════════════════════════════════════════
+");
     }
 
     /**
-     * Build SKU list and product comparison map
+     * Publish product in Shopify
      */
-    private function buildSkuList($allProducts)
+    private function publishProduct($shop, $productId)
     {
-        $products = [];
-        $sku_list = [];
+        try {
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $shop->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->put("https://{$shop->shopify_store_url}/admin/api/2025-07/products/{$productId}.json", [
+                    'product' => [
+                        'status' => 'active'
+                    ]
+                ]);
 
-        foreach ($allProducts as $product) {
-            if (!isset($product['variants'])) continue;
+            if ($response->successful()) {
+                $this->log("   ✅ Product published (status: active)");
+                return true;
+            } else {
+                $this->log("   ⚠️ Failed to publish product - Status: " . $response->status());
+                return false;
+            }
+        } catch (\Exception $e) {
+            $this->log("   ⚠️ Error publishing product: " . $e->getMessage());
+            return false;
+        }
+    }
 
-            // Extract updated_at from metafields
-            $metafieldUpdatedAt = null;
-            if (isset($product['metafields']) && is_array($product['metafields'])) {
-                foreach ($product['metafields'] as $metafield) {
-                    if ($metafield['namespace'] === 'custom' && $metafield['key'] === 'updated_at') {
-                        $metafieldUpdatedAt = $metafield['value'];
+    /**
+     * Unpublish product in Shopify (set to draft)
+     */
+    private function unpublishProduct($shop, $productId)
+    {
+        try {
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $shop->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->put("https://{$shop->shopify_store_url}/admin/api/2025-07/products/{$productId}.json", [
+                    'product' => [
+                        'status' => 'draft'
+                    ]
+                ]);
+
+            if ($response->successful()) {
+                $this->log("   📴 Product unpublished (status: draft)");
+                return true;
+            } else {
+                $this->log("   ⚠️ Failed to unpublish product - Status: " . $response->status());
+                return false;
+            }
+        } catch (\Exception $e) {
+            $this->log("   ⚠️ Error unpublishing product: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Insert new product - SIMPLIFIED with better error handling
+     */
+    private function insertNewProduct($product, $shopUrl)
+    {
+        try {
+            $settings = Setting::where('shopify_store_url', $shopUrl)->first();
+            if (!$settings) {
+                $this->log("   ❌ Settings not found for shop");
+                return false;
+            }
+
+            $settingsController = new SettingsController();
+            $sku = $product['ID'] ?? null;
+
+            // Validation
+            if (!$sku) {
+                $this->log("   ❌ Missing SKU");
+                return false;
+            }
+
+            if (empty($product['title'])) {
+                $this->log("   ❌ Missing title");
+                return false;
+            }
+
+            if (empty($product['regularPrice'])) {
+                $this->log("   ❌ Missing regular price");
+                return false;
+            }
+
+            if (empty($product['images'])) {
+                $this->log("   ❌ Missing images");
+                return false;
+            }
+
+            $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+
+            // Check if already exists by SKU
+            $existingSkuProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
+            if ($existingSkuProduct) {
+                $this->log("   ⏭️ Already exists by SKU");
+                return false;
+            }
+
+            // Check if already exists by title
+            $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
+            if ($existingTitleProduct) {
+                $this->log("   ⏭️ Already exists by title");
+                return false;
+            }
+
+            // Build tags
+            $tags = $this->buildProductTags($product);
+
+            // Get prices
+            $regularPrice = $product['regularPrice'] ?? '0.00';
+            $sellingPrice = $product['sellingPrice'] ?? null;
+            $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
+
+            // Get size data
+            $size = $product['size'] ?? '';
+            $shapeTags = [];
+            if (!empty($product['shapeCategoryTags'])) {
+                $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
+                $shapeTags = array_map('ucfirst', $shapeTags);
+            }
+
+            $nominalSize = $settingsController->convertSizeToNominal($size);
+            if (!empty($shapeTags)) {
+                $nominalSize .= ' ' . implode(' ', $shapeTags);
+            }
+
+            // Get colors
+            $colors = [];
+            if (!empty($product['colourTags'])) {
+                $colors = array_map('trim', explode(',', $product['colourTags']));
+            }
+
+            // Build variants
+            $variants = $this->buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice);
+
+            // Build title
+            $updatedTitle = $product['title'] . ' #' . $sku;
+            if (!empty($size)) {
+                $updatedTitle = $size . ' ' . $updatedTitle;
+            }
+
+            // Build product payload
+            $shopifyProduct = [
+                "product" => [
+                    'title' => $updatedTitle,
+                    'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
+                    'vendor' => $product['vendor'] ?? 'Oriental Rug Mart',
+                    'product_type' => isset($product['constructionType']) ? ucfirst($product['constructionType']) : '',
+                    "options" => [
+                        ["name" => "Size", "values" => [$size]],
+                        ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
+                        ["name" => "Nominal Size", "values" => [$nominalSize]],
+                    ],
+                    'images' => array_map(fn($imgUrl, $i) => ['src' => $imgUrl, 'position' => $i + 1], $product['images'], array_keys($product['images'])),
+                    'tags' => implode(', ', array_unique($tags)),
+                    "variants" => $variants,
+                    'status' => ($product['status'] ?? '') === 'available' ? 'active' : 'draft', // Set status based on Rug API
+                ]
+            ];
+
+            // Create product
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
+
+            if (!$response->successful()) {
+                $this->log("   ❌ Failed to create product - Status: " . $response->status());
+                $this->log("   Response: " . $response->body());
+                return false;
+            }
+
+            $productData = $response->json();
+            $productId = $productData['product']['id'] ?? null;
+
+            if (!$productId) {
+                $this->log("   ❌ Product created but no ID returned");
+                return false;
+            }
+
+            // Add metafields
+            $metafields = $this->buildMetafields($product);
+            foreach ($metafields as $metafield) {
+                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type' => 'application/json',
+                    ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                        'metafield' => $metafield
+                    ]);
+
+                usleep(200000); // Rate limit
+            }
+
+            $this->log("   ✅ Product created successfully - ID: {$productId}");
+            return true;
+        } catch (\Exception $e) {
+            $this->log("   ❌ Exception: " . $e->getMessage());
+            //$this->log("   Trace: " . $e->getTraceAsString());
+            return false;
+        }
+    }
+
+    /**
+     * Build product tags from Rug API data
+     */
+    private function buildProductTags($product)
+    {
+        $tags = [];
+
+        // Product category tags
+        if (!empty($product['product_category'])) {
+            if ($product['product_category'] === 'both') {
+                $tags[] = 'Rugs for Rent';
+                $tags[] = 'Rugs for Sale';
+            } elseif ($product['product_category'] === 'rental') {
+                $tags[] = 'Rugs for Rent';
+            } elseif ($product['product_category'] === 'sale') {
+                $tags[] = 'Rugs for Sale';
+            }
+        }
+
+        // Other tag fields
+        $tagFields = [
+            'constructionType',
+            'country',
+            'primaryMaterial',
+            'design',
+            'palette',
+            'pattern',
+            'styleTags',
+            'foundation',
+            'region',
+            'rugType',
+            'productType'
+        ];
+
+        foreach ($tagFields as $field) {
+            if (!empty($product[$field])) {
+                if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
+                    $values = array_map('trim', explode(',', $product[$field]));
+                    $tags = array_merge($tags, $values);
+                } else {
+                    $tags[] = $product[$field];
+                }
+            }
+        }
+
+        // Size category tags
+        if (!empty($product['sizeCategoryTags'])) {
+            $sizeTags = array_map('trim', explode(',', $product['sizeCategoryTags']));
+            $tags = array_merge($tags, $sizeTags);
+        }
+
+        // Shape tags
+        if (!empty($product['shapeCategoryTags'])) {
+            $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
+            $tags = array_merge($tags, $shapeTags);
+        }
+
+        // Color tags
+        if (!empty($product['colourTags'])) {
+            $colorTags = array_map('trim', explode(',', $product['colourTags']));
+            $tags = array_merge($tags, $colorTags);
+        }
+
+        // Collections
+        if (!empty($product['collectionDocs'])) {
+            foreach ($product['collectionDocs'] as $collection) {
+                if (!empty($collection['name'])) {
+                    $tags[] = trim($collection['name']);
+                }
+            }
+        }
+
+        // Category and subcategory
+        if (!empty($product['category'])) $tags[] = $product['category'];
+        if (!empty($product['subCategory'])) $tags[] = $product['subCategory'];
+
+        return array_filter($tags);
+    }
+
+    /**
+     * Build variants array
+     */
+    private function buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice)
+    {
+        $variants = [];
+
+        if (!empty($colors)) {
+            foreach ($colors as $color) {
+                $variantData = [
+                    "option1" => $size,
+                    "option2" => $color,
+                    "option3" => $nominalSize,
+                    "price" => $currentPrice,
+                    'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                    'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? 0,
+                    'sku' => $product['ID'] ?? '',
+                    "requires_shipping" => true,
+                    "taxable" => true,
+                    "grams" => $product['weight_grams'] ?? 0,
+                ];
+
+                if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                    $variantData['compare_at_price'] = $regularPrice;
+                }
+
+                $variants[] = $variantData;
+            }
+        } else {
+            $variantData = [
+                "option1" => $size,
+                "option2" => 'Default',
+                "option3" => $nominalSize,
+                "price" => $currentPrice,
+                'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? 0,
+                'sku' => $product['ID'] ?? '',
+                "requires_shipping" => true,
+                "taxable" => true,
+                "grams" => $product['weight_grams'] ?? 0,
+            ];
+
+            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                $variantData['compare_at_price'] = $regularPrice;
+            }
+
+            $variants[] = $variantData;
+        }
+
+        return $variants;
+    }
+
+    /**
+     * Build metafields array
+     */
+    private function buildMetafields($product)
+    {
+        $metafields = [
+            ['namespace' => 'custom', 'key' => 'height', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['height'] ?? 0), 'unit' => 'INCHES'])],
+            ['namespace' => 'custom', 'key' => 'length', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['length'] ?? 0), 'unit' => 'INCHES'])],
+            ['namespace' => 'custom', 'key' => 'width', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['width'] ?? 0), 'unit' => 'INCHES'])],
+        ];
+
+        // Other metafields
+        $metaFieldMap = [
+            'sizeCategoryTags' => 'size_category_tags',
+            'costType' => 'cost_type',
+            'cost' => 'cost',
+            'condition' => 'condition',
+            'productType' => 'product_type',
+            'rugType' => 'rug_type',
+            'constructionType' => 'construction_type',
+            'country' => 'country',
+            'production' => 'production',
+            'primaryMaterial' => 'primary_material',
+            'design' => 'design',
+            'palette' => 'palette',
+            'pattern' => 'pattern',
+            'pile' => 'pile',
+            'period' => 'period',
+            'styleTags' => 'style_tags',
+            'otherTags' => 'other_tags',
+            'colourTags' => 'color_tags',
+            'foundation' => 'foundation',
+            'age' => 'age',
+            'quality' => 'quality',
+            'conditionNotes' => 'condition_notes',
+            'region' => 'region',
+            'density' => 'density',
+            'knots' => 'knots',
+            'rugID' => 'rug_id',
+            'size' => 'size',
+            'isTaxable' => 'is_taxable',
+            'subCategory' => 'subcategory',
+            'created_at' => 'created_at',
+            'updated_at' => 'updated_at',
+        ];
+
+        foreach ($metaFieldMap as $field => $key) {
+            if (!empty($product[$field])) {
+                $metafields[] = [
+                    'namespace' => 'custom',
+                    'key' => $key,
+                    'type' => 'single_line_text_field',
+                    'value' => (string)$product[$field]
+                ];
+            }
+        }
+
+        // Rental price
+        if (!empty($product['rental_price_value'])) {
+            $rental = $product['rental_price_value'];
+            $rentalPrice = '';
+
+            if (isset($rental['key']) && $rental['key'] === 'general_price') {
+                $rentalPrice = $rental['value'];
+            } elseif (!empty($rental['redq_day_ranges_cost'])) {
+                foreach ($rental['redq_day_ranges_cost'] as $range) {
+                    if (!empty($range['range_cost'])) {
+                        $rentalPrice = $range['range_cost'];
                         break;
                     }
                 }
             }
 
-            foreach ($product['variants'] as $variant) {
-                $sku = $variant['sku'] ?? null;
-                $variantId = $variant['id'] ?? null;
-                $variantUpdatedAt = $variant['updated_at'] ?? $product['updated_at'] ?? null;
-
-                if (!empty($sku)) {
-                    $sku_list[] = $sku;
-                    $products[$sku] = [
-                        'id'                    => $variantId,
-                        'sku'                   => $sku,
-                        'product_id'            => $product['id'],
-                        'title'                 => $product['title'],
-                        'variant_id'            => $variantId,
-                        'variant_name'          => $variant['title'],
-                        'last_updated'          => $variantUpdatedAt,
-                        'metafield_updated_at'  => $metafieldUpdatedAt,
-                        'metafields'            => $product['metafields'] ?? [],
-                        'full_product'          => $product, // Keep full product data
-                    ];
-                }
+            if (!empty($rentalPrice)) {
+                $metafields[] = [
+                    'namespace' => 'custom',
+                    'key' => 'rental_price',
+                    'value' => $rentalPrice,
+                    'type' => 'single_line_text_field'
+                ];
             }
         }
 
-        $this->log("📦 Total SKUs collected: " . count($sku_list));
-        return [$products, $sku_list];
+        // Source marker
+        $metafields[] = [
+            'namespace' => 'custom',
+            'key' => 'source',
+            'type' => 'boolean',
+            'value' => true
+        ];
+
+        return $metafields;
     }
 
     /**
-     * Get Rug API token
+     * Update Shopify product - ROBUST version with proper option handling
      */
-    private function getRugApiToken($settings)
-    {
-        $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
-
-        if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
-            $tokenResponse = Http::withHeaders([
-                'Content-Type' => 'application/json',
-                'Accept' => 'application/json',
-                'x-api-key' => $settings->api_key,
-            ])->timeout(3600)->post('https://plugin-api.rugsimple.com/api/token');
-
-            if (!$tokenResponse->successful() || !isset($tokenResponse['token'])) {
-                $this->log("❌ Failed to get token from Rug API. Status: " . $tokenResponse->status());
-                return null;
-            }
-
-            $token = $tokenResponse['token'];
-            $settings->token = $token;
-            $settings->token_expiry = Carbon::now()->addHours(3);
-            $settings->save();
-
-            $this->log("🔑 New Rug API token retrieved.");
-            return $token;
-        }
-
-        return $settings->token;
-    }
-
-    /**
-     * Fetch Rug products
-     */
-    private function fetchRugProducts($token, $sku_list)
-    {
-        $response = Http::withHeaders([
-            'Content-Type' => 'application/json',
-            'Accept' => 'application/json',
-            'Authorization' => 'Bearer ' . $token,
-        ])->timeout(3600)->post('https://plugin-api.rugsimple.com/api/rug', [
-            'ids' => $sku_list
-        ]);
-
-        if (!$response->successful()) {
-            $this->log("❌ Failed to fetch Rug products. Status: " . $response->status());
-            return [];
-        }
-
-        $data = $response->json();
-
-        $this->log("Fetch Rug products. Status: " . count($data['data'] ?? []));
-
-        return $data['data'] ?? [];
-    }
-
-    /**
-     * Compare Rug vs Shopify products and update
-     */
-    private function compareAndUpdateProducts($rugProducts, $shopifyProducts,  $settings)
-    {
-        foreach ($rugProducts as $rug) {
-            $sku = $rug['ID'] ?? '';
-            if (empty($sku) || !isset($shopifyProducts[$sku])) continue;
-
-            $shopifyData = $shopifyProducts[$sku];
-            $productId = $shopifyData['id'];
-            $shopifyUpdated = $shopifyData['metafield_updated_at'] ?? '';
-            $rugUpdated = $rug['updated_at'];
-
-            //$this->log("Comparing RUG ($sku) and Shopify ($productId) last updated dates...");
-            //$this->log("RUG Last Updated: " . ($rugUpdated ?? 'N/A'));
-            //$this->log("Shopify Last Updated: " . ($shopifyUpdated ?? 'N/A'));
-
-            if (empty($shopifyUpdated)) {
-                //$this->log("⚠️ No updated_at found for SKU: {$sku}");
-                continue;
-            }
-
-            // Convert timestamps to comparable format
-            $shopifyTimestamp = strtotime($shopifyUpdated);
-            $rugTimestamp = strtotime($rugUpdated);
-
-            // Log the actual timestamp values for debugging
-            $this->log("RUG Timestamp: {$rugTimestamp} (" . date('Y-m-d H:i:s', $rugTimestamp) . ")");
-            $this->log("Shopify Timestamp: {$shopifyTimestamp} (" . date('Y-m-d H:i:s', $shopifyTimestamp) . ")");
-
-            // Calculate the difference in seconds
-            $timeDifference = $rugTimestamp - $shopifyTimestamp;
-            $this->log("Time Difference: {$timeDifference} seconds");
-
-            // Compare: if rug data is newer (strictly greater, not equal), update Shopify
-            if ($timeDifference > 0) {
-                $this->log("🔄 RUG data is NEWER by {$timeDifference} seconds for SKU: {$sku}. Updating Shopify...");
-                $this->updateShopifyProduct($rug, $shopifyData, $settings);
-            } elseif ($timeDifference < 0) {
-                $absDiff = abs($timeDifference);
-                $this->log("⬅️ Shopify is NEWER by {$absDiff} seconds for SKU: {$sku}. Skipping update.");
-            } else {
-                $this->log("✅ Shopify is up-to-date for SKU: {$sku} (timestamps are equal)");
-            }
-        }
-    }
-
-    /**
-     * Update Shopify product if differences exist
-     */
-
     private function updateShopifyProduct(array $rug, array $shopifyData, $settings)
     {
+        $this->log("   🔧 Updating product...");
+
         try {
-            $updatePayload = [];
-            $updatedFields = [];
             $productId = $shopifyData['product_id'];
             $variantId = $shopifyData['variant_id'];
             $shopifyDomain = rtrim($settings->shopify_store_url, '/');
             $settingsController = new SettingsController();
-
-            // Use full_product instead of making API call
             $fullProduct = $shopifyData['full_product'];
+            $updatedFields = [];
 
-            // ----------------------
-            // 📝 PREPARE DATA FROM RUG
-            // ----------------------
-
-            // Get size and shape tags
+            // ===== PREPARE DATA =====
             $size = $rug['size'] ?? '';
             $shapeTags = [];
             if (!empty($rug['shapeCategoryTags'])) {
-                $shapeTags = array_map('trim', explode(',', $rug['shapeCategoryTags']));
+                $shapeTags = array_map('ucfirst', array_map('trim', explode(',', $rug['shapeCategoryTags'])));
             }
 
             $nominalSize = $settingsController->convertSizeToNominal($size);
             if (!empty($shapeTags)) {
-                $shapeTags = array_map('ucfirst', $shapeTags);
                 $nominalSize .= ' ' . implode(' ', $shapeTags);
             }
 
-            // Get prices
             $regularPrice = $rug['regularPrice'] ?? null;
             $sellingPrice = $rug['sellingPrice'] ?? null;
             $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
 
-            // Get colors for variations
-            $variationColors = [];
             $colors = [];
             if (!empty($rug['colourTags'])) {
-                $colorTags = array_map('trim', explode(',', $rug['colourTags']));
-                foreach ($colorTags as $colorTag) {
-                    $variationColors[] = $colorTag;
-                    $colors[] = $colorTag;
-                }
+                $colors = array_map('trim', explode(',', $rug['colourTags']));
             }
 
-            // Build title
             $updatedTitle = $rug['title'] . ' #' . $rug['ID'];
             if (!empty($size)) {
                 $updatedTitle = $size . ' ' . $updatedTitle;
             }
 
-            // ----------------------
-            // 📝 CORE PRODUCT FIELDS
-            // ----------------------
-            if (!empty($updatedTitle) && $updatedTitle !== ($fullProduct['title'] ?? '')) {
-                $updatePayload['title'] = $updatedTitle;
-                $updatedFields[] = 'title';
-                $this->log("   🔸 Title changed: '{$fullProduct['title']}' → '{$updatedTitle}'");
+            // ===== STEP 1: UPDATE PRODUCT LEVEL (without variants/options) =====
+            $productPayload = [
+                'title' => $updatedTitle,
+                'body_html' => '<p>' . ($rug['description'] ?? '') . '</p>',
+            ];
+
+            if (!empty($rug['vendor'])) {
+                $productPayload['vendor'] = $rug['vendor'];
             }
 
-            // Helper to clean description
-            $cleanText = function ($text) {
-                $text = html_entity_decode($text ?? '', ENT_QUOTES | ENT_HTML5, 'UTF-8');
-                $text = strip_tags($text);
-                $text = preg_replace('/[\xC2\xA0|\s]+/u', ' ', $text);
-                $text = preg_replace('/[[:cntrl:]]/', '', $text);
-                $text = strtolower(trim($text));
-                return $text;
-            };
-
-            // Only check description if it exists in rug data
-            if (isset($rug['description']) && !empty($rug['description'])) {
-                $rugDescription = '<p>' . $rug['description'] . '</p>';
-                $rugDescriptionClean = $cleanText($rugDescription);
-                $shopifyDescriptionClean = $cleanText($fullProduct['body_html'] ?? '');
-
-                if ($rugDescriptionClean !== $shopifyDescriptionClean) {
-                    $updatePayload['body_html'] = $rugDescription;
-                    $updatedFields[] = 'description';
-                    $this->log("   🔸 Description changed");
-                }
+            if (!empty($rug['constructionType'])) {
+                $productPayload['product_type'] = ucfirst($rug['constructionType']);
             }
 
-            // Only check vendor if provided in rug data
-            if (isset($rug['vendor']) && !empty($rug['vendor'])) {
-                if ($rug['vendor'] !== ($fullProduct['vendor'] ?? '')) {
-                    $updatePayload['vendor'] = $rug['vendor'];
-                    $updatedFields[] = 'vendor';
-                    $this->log("   🔸 Vendor changed: '{$fullProduct['vendor']}' → '{$rug['vendor']}'");
-                }
+            // Tags
+            $tags = $this->buildProductTags($rug);
+            if (!empty($tags)) {
+                $productPayload['tags'] = implode(',', array_unique($tags));
             }
 
-            // Product type from constructionType - only if provided
-            if (isset($rug['constructionType']) && !empty($rug['constructionType'])) {
-                $productType = ucfirst($rug['constructionType']);
-                if ($productType !== ($fullProduct['product_type'] ?? '')) {
-                    $updatePayload['product_type'] = $productType;
-                    $updatedFields[] = 'product_type';
-                    $this->log("   🔸 Product type changed: '{$fullProduct['product_type']}' → '{$productType}'");
-                }
-            }
-
-            // Tags - Only update if tag fields are provided in rug data
-            $hasTagData = false;
-            $tags = [];
-
-            if (isset($rug['sizeCategoryTags']) && !empty($rug['sizeCategoryTags'])) {
-                $tags = array_merge($tags, array_map('trim', explode(',', $rug['sizeCategoryTags'])));
-                $hasTagData = true;
-            }
-            if (isset($rug['styleTags']) && !empty($rug['styleTags'])) {
-                $tags = array_merge($tags, array_map('trim', explode(',', $rug['styleTags'])));
-                $hasTagData = true;
-            }
-            if (isset($rug['otherTags']) && !empty($rug['otherTags'])) {
-                $tags = array_merge($tags, array_map('trim', explode(',', $rug['otherTags'])));
-                $hasTagData = true;
-            }
-            if (isset($rug['colourTags']) && !empty($rug['colourTags'])) {
-                $tags = array_merge($tags, array_map('trim', explode(',', $rug['colourTags'])));
-                $hasTagData = true;
-            }
-            if (!empty($shapeTags)) {
-                $tags = array_merge($tags, $shapeTags);
-                $hasTagData = true;
-            }
-
-            if ($hasTagData) {
-                $rugTags = implode(',', array_unique(array_filter($tags)));
-                $currentTags = $fullProduct['tags'] ?? '';
-
-                //$this->log("   🔸 Tags: " . json_encode(array_map('trim', explode(',', $currentTags))));
-
-                // Normalize tags for comparison (lowercase + trim)
-                $rugTagsArray = array_map(fn($t) => strtolower(trim($t)), explode(',', $rugTags));
-                $currentTagsArray = array_map(fn($t) => strtolower(trim($t)), explode(',', $currentTags));
-
-                // Remove empty values
-                $rugTagsArray = array_filter($rugTagsArray);
-                $currentTagsArray = array_filter($currentTagsArray);
-
-                sort($rugTagsArray);
-                sort($currentTagsArray);
-
-                if ($rugTagsArray !== $currentTagsArray) {
-                    $updatePayload['tags'] = $rugTags;
-
-                    $added = array_diff($rugTagsArray, $currentTagsArray);
-                    $removed = array_diff($currentTagsArray, $rugTagsArray);
-                    if (!empty($added)) {
-                        $this->log("   🔸 Tags added: " . implode(', ', $added));
-                        $updatedFields[] = 'tags';
-                    }
-                    if (!empty($removed)) {
-                        $this->log("   🔸 Tags removed: " . implode(', ', $removed));
-                        $updatedFields[] = 'tags';
-                    }
-                }
-            }
-
-            // ----------------------
-            // 📝 UPDATE PRODUCT (if needed)
-            // ----------------------
-            if (!empty($updatePayload)) {
-                $this->log("📝 Updating Shopify product {$productId} (SKU: {$shopifyData['sku']})");
-                $productUrl = "https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json";
-
-                $response = Http::withHeaders([
+            // Update product (without images and options first)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type' => 'application/json',
-                ])->put($productUrl, [
-                    'product' => $updatePayload
+                ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                    'product' => $productPayload
                 ]);
 
-                if ($response->successful()) {
-                    $this->log("✅ Product fields updated: " . implode(', ', $updatedFields));
-                    // Update fullProduct with new data for subsequent operations
-                    $fullProduct = array_merge($fullProduct, $updatePayload);
-                } else {
-                    $this->log("❌ Failed to update product {$productId} - Status: {$response->status()} - " . $response->body());
-                    return;
+            if ($response->successful()) {
+                $updatedFields[] = 'product_basic';
+                $this->log("      ✓ Product basic info updated");
+            } else {
+                $this->log("      ⚠️ Product basic update failed - Status: " . $response->status());
+                $this->log("      Response: " . $response->body());
+            }
+
+            usleep(500000);
+
+            // ===== STEP 2: ENSURE PRODUCT OPTIONS EXIST =====
+            $this->log("      🔧 Ensuring product options...");
+
+            $currentOptions = $fullProduct['options'] ?? [];
+            $needsOptions = false;
+
+            // Check if we have all 3 options
+            $hasSize = false;
+            $hasColor = false;
+            $hasNominal = false;
+
+            foreach ($currentOptions as $option) {
+                $optionName = strtolower($option['name'] ?? '');
+                if ($optionName === 'size') $hasSize = true;
+                if ($optionName === 'color') $hasColor = true;
+                if ($optionName === 'nominal size') $hasNominal = true;
+            }
+
+            if (!$hasSize || !$hasColor || !$hasNominal) {
+                $needsOptions = true;
+                $this->log("      ⚠️ Missing product options - will add them");
+
+                // Add missing options
+                $optionsPayload = [];
+                if (!$hasSize) {
+                    $optionsPayload[] = ['name' => 'Size', 'values' => [$size ?: 'Default']];
+                }
+                if (!$hasColor) {
+                    $optionsPayload[] = ['name' => 'Color', 'values' => !empty($colors) ? $colors : ['Default']];
+                }
+                if (!$hasNominal) {
+                    $optionsPayload[] = ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']];
                 }
 
-                // Rate limit
+                // Update product with options
+                $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type' => 'application/json',
+                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                        'product' => [
+                            'options' => array_merge($currentOptions, $optionsPayload)
+                        ]
+                    ]);
+
+                if ($optionsResponse->successful()) {
+                    $this->log("      ✓ Product options added");
+                    $updatedFields[] = 'options_added';
+
+                    // Refresh product data
+                    $refreshResponse = Http::timeout(60)->connectTimeout(30)
+                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                        ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
+
+                    if ($refreshResponse->successful()) {
+                        $fullProduct = $refreshResponse->json('product');
+                    }
+                } else {
+                    $this->log("      ⚠️ Failed to add options - Status: " . $optionsResponse->status());
+                }
+
                 usleep(500000);
             }
 
-            // ----------------------
-            // 📝 VARIANT FIELDS
-            // ----------------------
+            // ===== STEP 3: UPDATE VARIANT =====
+            $this->log("      🔧 Updating variant...");
 
-            // Find current variant data
             $currentVariant = collect($fullProduct['variants'])->firstWhere('id', $variantId);
-
             if (!$currentVariant) {
-                $this->log("⚠️ Variant {$variantId} not found in product {$productId}");
-                return;
-            }
-
-            $variantPayload = [];
-
-            // Update SKU - only if provided
-            if (isset($rug['ID']) && !empty($rug['ID']) && $rug['ID'] !== ($currentVariant['sku'] ?? '')) {
-                $variantPayload['sku'] = $rug['ID'];
-                $updatedFields[] = 'variant:sku';
-                //$this->log("   🔸 Variant SKU changed: '{$currentVariant['sku']}' → '{$rug['ID']}'");
-            }
-
-            // Update price - only if provided
-            if (isset($regularPrice) || isset($sellingPrice)) {
-                if (!empty($currentPrice) && $currentPrice != ($currentVariant['price'] ?? null)) {
-                    $variantPayload['price'] = $currentPrice;
-                    $updatedFields[] = 'variant:price';
-                    //$this->log("   🔸 Variant price changed: '{$currentVariant['price']}' → '{$currentPrice}'");
+                $this->log("      ⚠️ Variant not found after refresh");
+                // Try to find by SKU
+                foreach ($fullProduct['variants'] as $v) {
+                    if ($v['sku'] === $rug['ID']) {
+                        $currentVariant = $v;
+                        $variantId = $v['id'];
+                        break;
+                    }
                 }
 
-                // Update compare_at_price (for sale items)
-                $compareAtPrice = null;
-                if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                    $compareAtPrice = $regularPrice;
-                }
-                $currentComparePrice = $currentVariant['compare_at_price'] ?? null;
-                // Handle string vs number comparison for compare_at_price
-                $currentComparePriceStr = $currentComparePrice !== null ? (string)$currentComparePrice : null;
-                $compareAtPriceStr = $compareAtPrice !== null ? number_format((float)$compareAtPrice, 2, '.', '') : null;
-
-                if ($currentComparePriceStr !== $compareAtPriceStr) {
-                    $variantPayload['compare_at_price'] = $compareAtPrice;
-                    $updatedFields[] = 'variant:compare_at_price';
-                    //$this->log("   🔸 Compare at price changed: '{$currentComparePrice}' → '{$compareAtPrice}'");
+                if (!$currentVariant) {
+                    $this->log("      ❌ Cannot find variant - skipping variant update");
+                    return false;
                 }
             }
 
-            // Update inventory - only if provided
+            $variantPayload = [
+                'sku' => $rug['ID'],
+                'price' => $currentPrice,
+            ];
+
+            // Only update options if they're defined
+            if ($hasSize || $needsOptions) {
+                $variantPayload['option1'] = $size ?: 'Default';
+            }
+            if ($hasColor || $needsOptions) {
+                $variantPayload['option2'] = !empty($colors) ? $colors[0] : 'Default';
+            }
+            if ($hasNominal || $needsOptions) {
+                $variantPayload['option3'] = $nominalSize ?: 'Default';
+            }
+
+            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                $variantPayload['compare_at_price'] = $regularPrice;
+            } else {
+                $variantPayload['compare_at_price'] = null;
+            }
+
             if (isset($rug['inventory']['manageStock'])) {
-                $inventoryManagement = $rug['inventory']['manageStock'] ? 'shopify' : null;
-                if ($inventoryManagement !== ($currentVariant['inventory_management'] ?? null)) {
-                    $variantPayload['inventory_management'] = $inventoryManagement;
-                    $updatedFields[] = 'variant:inventory_management';
-                    //$this->log("   🔸 Inventory management changed: '{$currentVariant['inventory_management']}' → '{$inventoryManagement}'");
-                }
+                $variantPayload['inventory_management'] = $rug['inventory']['manageStock'] ? 'shopify' : null;
             }
 
-            // Update weight - only if provided
-            if (isset($rug['weight_grams']) && $rug['weight_grams'] != ($currentVariant['grams'] ?? null)) {
+            if (isset($rug['weight_grams'])) {
                 $variantPayload['grams'] = $rug['weight_grams'];
-                $updatedFields[] = 'variant:weight';
-                //$this->log("   🔸 Variant weight changed: '{$currentVariant['grams']}' → '{$rug['weight_grams']}'");
             }
 
-            // ----------------------
-            // 🚨 CRITICAL: VARIANT OPTIONS UPDATE
-            // ----------------------
-            $needsOptionUpdate = false;
-
-            // Helper to normalize size strings for comparison (handles spacing differences)
-            $normalizeSize = function ($sizeStr) {
-                // Remove extra spaces and normalize quotes
-                $normalized = preg_replace('/\s+/', ' ', trim($sizeStr));
-                $normalized = str_replace(['"', '"', '"'], '"', $normalized); // Normalize smart quotes
-                return $normalized;
-            };
-
-            // Check option1 (size) - THIS IS THE KEY FIX
-            if (array_key_exists('size', $rug)) { // Check if size key exists in rug data
-                $currentOption1 = $normalizeSize($currentVariant['option1'] ?? '');
-                $newOption1 = $normalizeSize($size);
-
-                //$this->log("   🔍 Checking Option1 (Size): Current='{$currentOption1}' | New='{$newOption1}'");
-
-                if ($newOption1 !== '' && $newOption1 !== $currentOption1) {
-                    $variantPayload['option1'] = $size; // Use original size, not normalized
-                    $updatedFields[] = 'variant:option1_size';
-                    $needsOptionUpdate = true;
-                    //$this->log("   🔸 Option1 (Size) changed: '{$currentVariant['option1']}' → '{$size}'");
-                }
-            }
-
-            // Check option3 (nominal size)
-            if (array_key_exists('size', $rug)) {
-                $currentOption3 = $normalizeSize($currentVariant['option3'] ?? '');
-                $newOption3 = $normalizeSize($nominalSize);
-
-                //$this->log("   🔍 Checking Option3 (Nominal): Current='{$currentOption3}' | New='{$newOption3}'");
-
-                if ($newOption3 !== '' && $newOption3 !== $currentOption3) {
-                    $variantPayload['option3'] = $nominalSize;
-                    $updatedFields[] = 'variant:option3_nominal';
-                    $needsOptionUpdate = true;
-                    //$this->log("   🔸 Option3 (Nominal) changed: '{$currentVariant['option3']}' → '{$nominalSize}'");
-                }
-            }
-
-            // Check option2 (color) - ONLY if colors are provided AND different
-            if (array_key_exists('colourTags', $rug) && !empty($colors)) {
-                $currentOption2 = $currentVariant['option2'] ?? 'Default';
-                $expectedColor = $colors[0];
-
-                //$this->log("   🔍 Checking Option2 (Color): Current='{$currentOption2}' | New='{$expectedColor}'");
-
-                if ($expectedColor !== $currentOption2) {
-                    $variantPayload['option2'] = $expectedColor;
-                    $updatedFields[] = 'variant:option2_color';
-                    $needsOptionUpdate = true;
-                    //$this->log("   🔸 Option2 (Color) changed: '{$currentOption2}' → '{$expectedColor}'");
-                }
-            }
-
-            // IMPORTANT: Check for duplicate variants
-            if ($needsOptionUpdate) {
-                $proposedOption1 = $variantPayload['option1'] ?? $currentVariant['option1'];
-                $proposedOption2 = $variantPayload['option2'] ?? $currentVariant['option2'];
-                $proposedOption3 = $variantPayload['option3'] ?? $currentVariant['option3'];
-
-                $duplicateVariant = collect($fullProduct['variants'])->first(function ($variant) use ($proposedOption1, $proposedOption2, $proposedOption3, $variantId) {
-                    return $variant['id'] !== $variantId &&
-                        $variant['option1'] === $proposedOption1 &&
-                        $variant['option2'] === $proposedOption2 &&
-                        $variant['option3'] === $proposedOption3;
-                });
-
-                if ($duplicateVariant) {
-                    $this->log("⚠️ Cannot update variant options - combination '{$proposedOption1} / {$proposedOption2} / {$proposedOption3}' already exists (Variant ID: {$duplicateVariant['id']})");
-                    unset($variantPayload['option1']);
-                    unset($variantPayload['option2']);
-                    unset($variantPayload['option3']);
-                    $updatedFields = array_filter($updatedFields, fn($f) => !str_contains($f, 'option'));
-                }
-            }
-
-            if (!empty($variantPayload)) {
-                $this->log("📝 Updating variant {$variantId}");
-                $variantUrl = "https://{$shopifyDomain}/admin/api/2025-07/variants/{$variantId}.json";
-
-                $variantResponse = Http::withHeaders([
+            $variantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type' => 'application/json',
-                ])->put($variantUrl, [
+                ])->put("https://{$shopifyDomain}/admin/api/2025-07/variants/{$variantId}.json", [
                     'variant' => $variantPayload
                 ]);
 
-                if ($variantResponse->successful()) {
-                    $variantUpdates = array_filter($updatedFields, fn($f) => str_starts_with($f, 'variant:'));
-                    $this->log("✅ Variant updated: " . implode(', ', $variantUpdates));
-                } else {
-                    $this->log("❌ Failed to update variant {$variantId} - Status: {$variantResponse->status()} - " . $variantResponse->body());
-                }
-
-                usleep(500000);
+            if ($variantResponse->successful()) {
+                $updatedFields[] = 'variant';
+                $this->log("      ✓ Variant updated");
+            } else {
+                $this->log("      ⚠️ Variant update failed - Status: " . $variantResponse->status());
+                $this->log("      Response: " . $variantResponse->body());
+                // Don't return false - continue with other updates
             }
 
-            // ----------------------
-            // 📝 INVENTORY QUANTITY UPDATE
-            // ----------------------
+            usleep(500000);
+
+            // ===== STEP 4: UPDATE INVENTORY =====
             if (isset($rug['inventory']['quantityLevel'][0]['available'])) {
+                $this->log("      🔧 Updating inventory...");
+
                 $newQuantity = $rug['inventory']['quantityLevel'][0]['available'];
-                $currentQuantity = $currentVariant['inventory_quantity'] ?? 0;
+                $inventoryItemId = $currentVariant['inventory_item_id'] ?? null;
 
-                if ($newQuantity != $currentQuantity && ($currentVariant['inventory_management'] ?? null) === 'shopify') {
-                    //$this->log("📝 Updating inventory quantity for variant {$variantId}");
-                    //$this->log("   🔸 Inventory changed: {$currentQuantity} → {$newQuantity}");
+                if ($inventoryItemId && ($currentVariant['inventory_management'] ?? null) === 'shopify') {
+                    $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                        ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-                    $inventoryItemId = $currentVariant['inventory_item_id'] ?? null;
+                    if ($locationsResponse->successful()) {
+                        $locations = $locationsResponse->json('locations');
+                        if (!empty($locations)) {
+                            $locationId = $locations[0]['id'];
 
-                    if ($inventoryItemId) {
-                        $locationsUrl = "https://{$shopifyDomain}/admin/api/2025-07/locations.json";
-                        $locationsResponse = Http::withHeaders([
-                            'X-Shopify-Access-Token' => $settings->shopify_token,
-                        ])->get($locationsUrl);
-
-                        if ($locationsResponse->successful()) {
-                            $locations = $locationsResponse->json('locations');
-                            if (!empty($locations)) {
-                                $locationId = $locations[0]['id'];
-
-                                $inventoryUrl = "https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json";
-                                $inventoryResponse = Http::withHeaders([
+                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                                ->withHeaders([
                                     'X-Shopify-Access-Token' => $settings->shopify_token,
                                     'Content-Type' => 'application/json',
-                                ])->post($inventoryUrl, [
+                                ])->post("https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json", [
                                     'location_id' => $locationId,
                                     'inventory_item_id' => $inventoryItemId,
                                     'available' => $newQuantity
                                 ]);
 
-                                if ($inventoryResponse->successful()) {
-                                    //$this->log("✅ Inventory updated");
-                                    $updatedFields[] = 'inventory:quantity';
-                                } else {
-                                    $this->log("❌ Failed to update inventory - Status: {$inventoryResponse->status()}");
-                                }
-
-                                usleep(500000);
+                            if ($invResponse->successful()) {
+                                $updatedFields[] = 'inventory';
+                                $this->log("      ✓ Inventory updated to {$newQuantity} units");
+                            } else {
+                                $this->log("      ⚠️ Inventory update failed");
                             }
+
+                            usleep(500000);
                         }
                     }
                 }
             }
 
-            // ----------------------
-            // 📝 IMAGES - ONLY UPDATE IF ACTUALLY CHANGED (FIXED)
-            // ----------------------
-            // ----------------------
-            // 📝 IMAGES - ONLY UPDATE IF ACTUALLY CHANGED (FIXED)
-            // ----------------------
-            if (isset($rug['images']) && is_array($rug['images']) && !empty($rug['images'])) {
-                $newUrls = array_values($rug['images']);
-                $currentImages = $fullProduct['images'] ?? [];
-                $currentUrls = array_values(array_map(fn($img) => $img['src'] ?? '', $currentImages));
+            // ===== STEP 5: UPDATE IMAGES =====
+            if (!empty($rug['images'])) {
+                $this->log("      🔧 Updating images...");
 
-                // Remove empty values
-                $newUrls = array_filter($newUrls);
-                $currentUrls = array_filter($currentUrls);
+                $imagePayload = array_map(fn($img) => ['src' => $img], $rug['images']);
 
-                // Extract filenames from URLs for comparison (ignore domain differences)
-                $extractFilename = function ($url) {
-                    // Get the filename with extension from URL
-                    $parts = parse_url($url);
-                    $path = $parts['path'] ?? '';
-                    $filename = basename($path);
-                    // Remove query parameters from filename comparison
-                    return explode('?', $filename)[0];
-                };
-
-                $newFilenames = array_map($extractFilename, $newUrls);
-                $currentFilenames = array_map($extractFilename, $currentUrls);
-
-                sort($newFilenames);
-                sort($currentFilenames);
-
-                //$this->log("   🔍 Comparing images:");
-                //$this->log("      Current count: " . count($currentFilenames));
-                //$this->log("      New count: " . count($newFilenames));
-
-                // Check if arrays are actually different
-                $imagesDifferent = false;
-
-                if (count($newFilenames) !== count($currentFilenames)) {
-                    $imagesDifferent = true;
-                    //$this->log("      → Different counts");
-                } else {
-                    // Compare each filename
-                    foreach ($newFilenames as $index => $filename) {
-                        if (!isset($currentFilenames[$index]) || $currentFilenames[$index] !== $filename) {
-                            $imagesDifferent = true;
-                            //$this->log("      → Filename mismatch at index {$index}");
-                            //$this->log("         Current: {$currentFilenames[$index]}");
-                            //$this->log("         New: {$filename}");
-                            break;
-                        }
-                    }
-                }
-
-                if ($imagesDifferent) {
-                    //$this->log("   📝 Images have changed - updating for product {$productId}");
-
-                    $newImages = array_map(fn($img) => ['src' => $img], $rug['images']);
-                    $productUrl = "https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json";
-
-                    $imageResponse = Http::withHeaders([
+                $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type' => 'application/json',
-                    ])->put($productUrl, [
-                        'product' => ['images' => $newImages]
+                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                        'product' => ['images' => $imagePayload]
                     ]);
 
-                    if ($imageResponse->successful()) {
-                        //$this->log("   ✅ Images updated");
-                        $updatedFields[] = 'images';
-                    } else {
-                        $this->log("   ❌ Failed to update images - Status: {$imageResponse->status()}");
-                    }
-
-                    usleep(500000);
+                if ($imageResponse->successful()) {
+                    $updatedFields[] = 'images';
+                    $this->log("      ✓ Images updated (" . count($rug['images']) . " images)");
                 } else {
-                    //$this->log("   ℹ️ Images unchanged (same filenames) - skipping update");
+                    $this->log("      ⚠️ Images update failed");
                 }
+
+                usleep(500000);
             }
 
-            // ----------------------
-            // 📝 CUSTOM METAFIELDS
-            // ----------------------
+            // ===== STEP 6: UPDATE METAFIELDS =====
+            $this->log("      🔧 Updating metafields...");
 
             $existingMetafields = [];
             foreach ($shopifyData['metafields'] as $meta) {
@@ -840,239 +1018,311 @@ class DailyImportCommand extends Command
                 $existingMetafields[$key] = $meta;
             }
 
-            $customUpdates = [];
+            $metaUpdates = 0;
 
-            // 1. Dimension fields
-            if (isset($rug['dimension']) && !empty($rug['dimension'])) {
+            // Dimension metafields
+            if (isset($rug['dimension'])) {
                 foreach (['length', 'width', 'height'] as $dim) {
-                    if (isset($rug['dimension'][$dim]) && !empty($rug['dimension'][$dim])) {
-                        $value = $rug['dimension'][$dim];
+                    if (isset($rug['dimension'][$dim])) {
+                        $value = json_encode(['value' => (float)$rug['dimension'][$dim], 'unit' => 'INCHES']);
                         $metaKey = 'custom.' . $dim;
-                        $current = $existingMetafields[$metaKey]['value'] ?? null;
+                        $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
-                        if ((string)$value !== (string)$current) {
-                            $customUpdates[] = [
-                                'id' => $existingMetafields[$metaKey]['id'] ?? null,
-                                'namespace' => 'custom',
-                                'key' => $dim,
-                                'value' => (string)$value,
-                                'type' => 'single_line_text_field'
-                            ];
-                            $updatedFields[] = "metafield:$dim";
-                            $this->log("   🔸 Metafield '{$dim}' changed: '{$current}' → '{$value}'");
+                        if ($metaId) {
+                            $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                                ->withHeaders([
+                                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    'Content-Type' => 'application/json',
+                                ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$metaId}.json", [
+                                    'metafield' => ['value' => $value, 'type' => 'dimension']
+                                ]);
+
+                            if ($metaResponse->successful()) {
+                                $metaUpdates++;
+                            }
+
+                            usleep(200000);
                         }
                     }
                 }
             }
 
-            // 2. Other metafields
-            $metaFields = [
+            // Other metafields
+            $metaFieldMap = [
                 'sizeCategoryTags' => 'size_category_tags',
-                'costType' => 'cost_type',
                 'cost' => 'cost',
                 'condition' => 'condition',
-                'productType' => 'product_type',
-                'rugType' => 'rug_type',
                 'constructionType' => 'construction_type',
                 'country' => 'country',
-                'production' => 'production',
                 'primaryMaterial' => 'primary_material',
                 'design' => 'design',
                 'palette' => 'palette',
                 'pattern' => 'pattern',
-                'pile' => 'pile',
-                'period' => 'period',
                 'styleTags' => 'style_tags',
-                'otherTags' => 'other_tags',
                 'colourTags' => 'color_tags',
-                'foundation' => 'foundation',
-                'age' => 'age',
-                'quality' => 'quality',
-                'conditionNotes' => 'condition_notes',
                 'region' => 'region',
-                'density' => 'density',
-                'knots' => 'knots',
-                'rugID' => 'rug_id',
+                'rugType' => 'rug_type',
                 'size' => 'size',
-                'isTaxable' => 'is_taxable',
-                'subCategory' => 'subcategory',
-                'created_at' => 'created_at',
                 'updated_at' => 'updated_at',
-                'consignmentisActive' => 'consignment_active',
-                'consignorRef' => 'consignor_ref',
-                'parentId' => 'parent_id',
-                'agreedLowPrice' => 'agreed_low_price',
-                'agreedHighPrice' => 'agreed_high_price',
-                'payoutPercentage' => 'payout_percentage'
             ];
 
-            foreach ($metaFields as $field => $key) {
+            foreach ($metaFieldMap as $field => $key) {
                 if (array_key_exists($field, $rug)) {
-                    $value = $rug[$field];
+                    $value = (string)$rug[$field];
                     $metaKey = 'custom.' . $key;
-                    $current = $existingMetafields[$metaKey]['value'] ?? null;
+                    $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
-                    if ((string)$value !== (string)$current) {
-                        $customUpdates[] = [
-                            'id' => $existingMetafields[$metaKey]['id'] ?? null,
-                            'namespace' => 'custom',
-                            'key' => $key,
-                            'value' => (string)$value,
-                            'type' => 'single_line_text_field'
-                        ];
-                        $updatedFields[] = "metafield:$key";
-                        $this->log("   🔸 Metafield '{$key}' changed: '{$current}' → '{$value}'");
+                    if ($metaId) {
+                        $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            ->withHeaders([
+                                'X-Shopify-Access-Token' => $settings->shopify_token,
+                                'Content-Type' => 'application/json',
+                            ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$metaId}.json", [
+                                'metafield' => ['value' => $value, 'type' => 'single_line_text_field']
+                            ]);
+
+                        if ($metaResponse->successful()) {
+                            $metaUpdates++;
+                        }
+
+                        usleep(200000);
                     }
                 }
             }
 
-            // 3. Cost per square
-            if (isset($rug['costPerSquare']['foot']) && !empty($rug['costPerSquare']['foot'])) {
-                $value = $rug['costPerSquare']['foot'];
-                $metaKey = 'custom.cost_per_square_foot';
-                $current = $existingMetafields[$metaKey]['value'] ?? null;
-
-                if ((string)$value !== (string)$current) {
-                    $customUpdates[] = [
-                        'id' => $existingMetafields[$metaKey]['id'] ?? null,
-                        'namespace' => 'custom',
-                        'key' => 'cost_per_square_foot',
-                        'value' => (string)$value,
-                        'type' => 'single_line_text_field'
-                    ];
-                    $updatedFields[] = "metafield:cost_per_square_foot";
-                    $this->log("   🔸 Metafield 'cost_per_square_foot' changed: '{$current}' → '{$value}'");
-                }
+            if ($metaUpdates > 0) {
+                $updatedFields[] = "{$metaUpdates}_metafields";
+                $this->log("      ✓ {$metaUpdates} metafields updated");
+            } else {
+                $this->log("      ℹ️ No metafields to update");
             }
 
-            if (isset($rug['costPerSquare']['meter']) && !empty($rug['costPerSquare']['meter'])) {
-                $value = $rug['costPerSquare']['meter'];
-                $metaKey = 'custom.cost_per_square_meter';
-                $current = $existingMetafields[$metaKey]['value'] ?? null;
-
-                if ((string)$value !== (string)$current) {
-                    $customUpdates[] = [
-                        'id' => $existingMetafields[$metaKey]['id'] ?? null,
-                        'namespace' => 'custom',
-                        'key' => 'cost_per_square_meter',
-                        'value' => (string)$value,
-                        'type' => 'single_line_text_field'
-                    ];
-                    $updatedFields[] = "metafield:cost_per_square_meter";
-                    $this->log("   🔸 Metafield 'cost_per_square_meter' changed: '{$current}' → '{$value}'");
-                }
+            // ===== FINAL RESULT =====
+            if (!empty($updatedFields)) {
+                $this->log("   ✅ Update completed: " . implode(', ', $updatedFields));
+                return true;
+            } else {
+                $this->log("   ⚠️ No fields were updated");
+                return false;
             }
+        } catch (\Exception $e) {
+            $this->log("   ❌ Update exception: " . $e->getMessage());
+            //$this->log("   Stack trace: " . $e->getTraceAsString());
+            return false;
+        }
+    }
 
-            // 4. Rental Price
-            if (isset($rug['rental_price_value']) && !empty($rug['rental_price_value'])) {
-                $rentalPrice = '';
-                $rental = $rug['rental_price_value'];
+    // ===== HELPER METHODS (Fetching, Filtering, etc.) =====
 
-                if (isset($rental['key']) && $rental['key'] === 'general_price') {
-                    $rentalPrice = $rental['value'];
-                } elseif (!empty($rental['redq_day_ranges_cost'])) {
-                    foreach ($rental['redq_day_ranges_cost'] as $range) {
-                        if (!empty($range['range_cost'])) {
-                            $rentalPrice = $range['range_cost'];
-                            break;
+    private function fetchAllRugProducts($token)
+    {
+        $allProducts = [];
+        $limit = 200;
+        $skip = 0;
+        $pageNumber = 1;
+
+        $this->log("
+🔄 Fetching all products from Rug API...");
+
+        while (true) {
+            try {
+                $response = Http::timeout(120)->connectTimeout(30)->retry(3, 5000)
+                    ->withHeaders([
+                        'Content-Type' => 'application/json',
+                        'Accept' => 'application/json',
+                        'Authorization' => 'Bearer ' . $token,
+                    ])->get("https://plugin-api.rugsimple.com/api/rug", [
+                        'limit' => $limit,
+                        'skip' => $skip
+                    ]);
+
+                if (!$response->successful()) {
+                    $this->log("   ❌ Rug API failed - Status: " . $response->status());
+                    break;
+                }
+
+                $data = $response->json();
+                $products = $data['data'] ?? [];
+                $pagination = $data['pagination'] ?? null;
+
+                if (empty($products)) {
+                    break;
+                }
+
+                $allProducts = array_merge($allProducts, $products);
+                $this->log("   📄 Page {$pageNumber}: " . count($products) . " products (Total: " . count($allProducts) . ")");
+
+                if ($pagination && isset($pagination['next']) && $pagination['next'] !== null) {
+                    $skip += $limit;
+                    $pageNumber++;
+                    usleep(200000);
+                } else {
+                    break;
+                }
+            } catch (\Exception $e) {
+                $this->log("   ❌ Error on page {$pageNumber}: " . $e->getMessage());
+                break;
+            }
+        }
+
+        return $allProducts;
+    }
+
+    private function filterRugProductsByDate($products, $cutoffDate)
+    {
+        $filtered = [];
+
+        foreach ($products as $product) {
+            $updatedAt = $product['updated_at'] ?? null;
+            if (empty($updatedAt)) continue;
+
+            try {
+                $productDate = Carbon::parse($updatedAt);
+                if ($productDate->isAfter($cutoffDate)) {
+                    $filtered[] = $product;
+                }
+            } catch (\Exception $e) {
+                continue;
+            }
+        }
+
+        return $filtered;
+    }
+
+    private function getShopifyProductBySKU($shop, $sku)
+    {
+        try {
+            $limit = 250;
+            $pageInfo = null;
+
+            do {
+                $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
+                if ($pageInfo) $url .= "&page_info={$pageInfo}";
+
+                $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $shop->shopify_token,
+                        'Content-Type' => 'application/json',
+                    ])->get($url);
+
+                if (!$response->successful()) return null;
+
+                $products = $response->json('products', []);
+
+                foreach ($products as $product) {
+                    foreach ($product['variants'] ?? [] as $variant) {
+                        if (($variant['sku'] ?? '') === $sku) {
+                            return $product;
                         }
                     }
                 }
 
-                if (!empty($rentalPrice)) {
-                    $metaKey = 'custom.rental_price';
-                    $current = $existingMetafields[$metaKey]['value'] ?? null;
-
-                    if ((string)$rentalPrice !== (string)$current) {
-                        $customUpdates[] = [
-                            'id' => $existingMetafields[$metaKey]['id'] ?? null,
-                            'namespace' => 'custom',
-                            'key' => 'rental_price',
-                            'value' => (string)$rentalPrice,
-                            'type' => 'single_line_text_field'
-                        ];
-                        $updatedFields[] = "metafield:rental_price";
-                        $this->log("   🔸 Metafield 'rental_price' changed: '{$current}' → '{$rentalPrice}'");
-                    }
+                $linkHeader = $response->header('Link');
+                if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
+                    $pageInfo = $matches[1];
+                } else {
+                    $pageInfo = null;
                 }
-            }
+            } while ($pageInfo);
 
-            // ----------------------
-            // 🚀 SEND METAFIELD UPDATES
-            // ----------------------
-            if (!empty($customUpdates)) {
-                $metaUpdateCount = 0;
-                foreach ($customUpdates as $field) {
-                    if (!empty($field['id'])) {
-                        $metaUrl = "https://{$shopifyDomain}/admin/api/2025-07/metafields/{$field['id']}.json";
-
-                        $response = Http::withHeaders([
-                            'X-Shopify-Access-Token' => $settings->shopify_token,
-                            'Content-Type' => 'application/json',
-                        ])->put($metaUrl, [
-                            'metafield' => [
-                                'value' => $field['value'],
-                                'type' => $field['type']
-                            ]
-                        ]);
-                    } else {
-                        $metaUrl = "https://{$shopifyDomain}/admin/api/metafields.json";
-
-                        $response = Http::withHeaders([
-                            'X-Shopify-Access-Token' => $settings->shopify_token,
-                            'Content-Type' => 'application/json',
-                        ])->post($metaUrl, [
-                            'metafield' => [
-                                'namespace' => $field['namespace'],
-                                'key' => $field['key'],
-                                'value' => $field['value'],
-                                'type' => $field['type'],
-                                'owner_id' => $productId,
-                                'owner_resource' => 'product'
-                            ]
-                        ]);
-                    }
-
-                    if ($response->successful()) {
-                        $metaUpdateCount++;
-                    } else {
-                        $this->log("❌ Failed to update metafield {$field['key']} - Status: {$response->status()}");
-                    }
-
-                    usleep(500000);
-                }
-
-                if ($metaUpdateCount > 0) {
-                    $this->log("✅ Updated {$metaUpdateCount} metafields");
-                }
-            }
-
-            // ----------------------
-            // 📊 FINAL SUMMARY
-            // ----------------------
-            if (empty($updatePayload) && empty($variantPayload) && empty($customUpdates) && !in_array('images', $updatedFields)) {
-                $this->log("⚠️ No changes needed for SKU: {$shopifyData['sku']}");
-            } else {
-                $this->log("🎉 Successfully updated product {$productId} (SKU: {$shopifyData['sku']})");
-                $this->log("   📋 Summary - Updated fields: " . implode(', ', array_unique($updatedFields)));
-            }
+            return null;
         } catch (\Exception $e) {
-            $this->log("❌ Exception updating product {$shopifyData['product_id']} - " . $e->getMessage());
+            return null;
         }
     }
 
+    private function getShopifyProductMetafields($shop, $productId)
+    {
+        try {
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $shop->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->get("https://{$shop->shopify_store_url}/admin/api/2025-07/products/{$productId}/metafields.json");
 
+            return $response->successful() ? $response->json('metafields', []) : [];
+        } catch (\Exception $e) {
+            return [];
+        }
+    }
 
-    /**
-     * Helper logging
-     */
+    private function getDaysToLookBack($shop)
+    {
+        if ($this->option('force-days')) {
+            return (int) $this->option('force-days');
+        }
+
+        $cacheKey = $this->cronTrackingKey . '_' . $shop->id;
+        $lastSuccessfulRun = Cache::get($cacheKey);
+
+        if (!$lastSuccessfulRun) {
+            return 7;
+        }
+
+        $daysSinceLastRun = Carbon::parse($lastSuccessfulRun)->diffInDays(Carbon::now());
+        return $daysSinceLastRun > 1 ? $daysSinceLastRun + 1 : 2;
+    }
+
+    private function markCronSuccess()
+    {
+        $shops = Setting::all();
+        foreach ($shops as $shop) {
+            Cache::put($this->cronTrackingKey . '_' . $shop->id, Carbon::now()->toIso8601String(), now()->addDays(30));
+        }
+        Cache::put($this->cronTrackingKey, Carbon::now()->toIso8601String(), now()->addDays(30));
+    }
+
+    private function getRugApiToken($settings)
+    {
+        $tokenExpiry = $settings->token_expiry ? Carbon::parse($settings->token_expiry) : null;
+
+        if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
+            try {
+                $tokenResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'Content-Type' => 'application/json',
+                        'Accept' => 'application/json',
+                        'x-api-key' => $settings->api_key,
+                    ])->post('https://plugin-api.rugsimple.com/api/token');
+
+                if (!$tokenResponse->successful() || !isset($tokenResponse['token'])) {
+                    return null;
+                }
+
+                $settings->token = $tokenResponse['token'];
+                $settings->token_expiry = Carbon::now()->addHours(3);
+                $settings->save();
+
+                return $tokenResponse['token'];
+            } catch (\Exception $e) {
+                return null;
+            }
+        }
+
+        return $settings->token;
+    }
+
+    private function initLog($shopUrl = null)
+    {
+        if (!empty($shopUrl)) {
+            $shopSlug = preg_replace('/[^a-zA-Z0-9_-]/', '_', parse_url($shopUrl, PHP_URL_HOST) ?? $shopUrl);
+            $logDir = storage_path('logs/imports/' . $shopSlug);
+        } else {
+            $logDir = storage_path('logs/imports/unknown');
+        }
+
+        if (!file_exists($logDir)) {
+            mkdir($logDir, 0777, true);
+        }
+
+        $this->logFilePath = $logDir . '/import_log_' . now()->format('Y-m-d_H-i-s') . '.log';
+    }
+
     private function log($message)
     {
-        // If logFilePath not set, fallback to an 'unknown' shop file to avoid failure
         if (empty($this->logFilePath)) {
             $this->initLog(null);
         }
-
         file_put_contents($this->logFilePath, $message . PHP_EOL, FILE_APPEND);
         $this->info($message);
     }
@@ -1088,24 +1338,16 @@ class DailyImportCommand extends Command
     {
         $errorMessage = '❌ CRON FAILED: ' . $e->getMessage();
 
-        // If a shop log is available, use it; otherwise write to an exception file in imports/exception
-        if (!empty($this->logFilePath) && dirname($this->logFilePath) !== storage_path('logs/imports')) {
-            // write to the last-used shop log
+        if (!empty($this->logFilePath)) {
             $this->log($errorMessage);
-        } else {
-            // ensure exception dir exists
-            $exDir = storage_path('logs/imports/exception');
-            if (!file_exists($exDir)) {
-                mkdir($exDir, 0777, true);
-            }
-            $exFile = $exDir . '/exception_' . now()->format('Y-m-d_H-i-s') . '.log';
-            file_put_contents($exFile, $errorMessage . PHP_EOL, FILE_APPEND);
+            $this->log("Stack trace: " . $e->getTraceAsString());
         }
 
         Log::error('Daily import failed', [
             'exception' => $e,
             'file' => $e->getFile(),
-            'line' => $e->getLine()
+            'line' => $e->getLine(),
+            'trace' => $e->getTraceAsString()
         ]);
 
         return Command::FAILURE;

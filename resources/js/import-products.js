@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const progressBar = document.getElementById('progress-bar');
     const logList = document.getElementById('log-list');
     const logsContainer = document.getElementById('import-logs');
+     const productSkusInput = document.getElementById('product_skus');
 
     if (importBtn) {
         importBtn.addEventListener('click', function (e) {
@@ -24,13 +25,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
             // Get shop value from button
             const shop = importBtn.dataset.shop;
-
+            const skus = productSkusInput ? productSkusInput.value.trim() : '';
             console.log('Starting import for shop:', shop);
+            console.log('SKUs to import:', skus);
+
+            // Build URL with parameters
+            let url = importBtn.dataset.url + '?stream=true&shop=' + encodeURIComponent(shop);
+            if (skus) {
+                url += '&skus=' + encodeURIComponent(skus);
+            }
+
+            console.log('EventSource URL:', url);
 
             // Create EventSource connection
-            const eventSource = new EventSource(importBtn.dataset.url + '?stream=true&shop=' + shop);
+            const eventSource = new EventSource(url);
 
-            console.log('EventSource created with URL:', importBtn.dataset.url + '?stream=true&shop=' + shop);
+            console.log('EventSource created with URL:', url);
 
             eventSource.onmessage = function (e) {
                 try {

@@ -559,6 +559,7 @@ class SettingsController extends Controller
     public function importProducts(Request $request)
     {
         $shop = $request->input('shop');
+        $skus = $request->input('skus');
         $settings = Setting::where('shopify_store_url', $shop)->first();
 
         if (!$settings) {
@@ -566,7 +567,7 @@ class SettingsController extends Controller
         }
 
         // Create StreamedResponse for SSE (real-time browser updates)
-        $response = new StreamedResponse(function () use ($request, $settings, $shop) {
+        $response = new StreamedResponse(function () use ($request, $settings, $shop, $skus) {
 
             // Ensure real-time flushing works
             @ini_set('zlib.output_compression', 0);
@@ -616,6 +617,20 @@ class SettingsController extends Controller
                 $failCount = 0;
                 $skippedCount = 0;
 
+                // === Process SKUs if provided ===
+                $skuArray = [];
+                if (!empty($skus)) {
+                    $skuArray = array_map('trim', explode(',', $skus));
+                    $skuArray = array_filter($skuArray); // Remove empty values
+
+                    if (!empty($skuArray)) {
+                        $sendMessage(['type' => 'info', 'message' => 'Filtering by ' . count($skuArray) . ' SKUs: ' . implode(', ', $skuArray)]);
+                    }
+                } else {
+                    $sendMessage(['type' => 'info', 'message' => 'No SKUs provided, importing products based on limit and skip settings.']);
+                }
+
+
 
                 if (!$settings || !$settings->api_key) {
                     $sendMessage(['type' => 'error', 'message' => 'API key not found. Please configure your client settings.']);
@@ -658,45 +673,98 @@ class SettingsController extends Controller
                     ]);
                 }
 
-
                 // === Get Products ===
-                $limit = $settings->product_limit ?? 10;
-                $skip = $settings->product_skip ?? 0;
+                if (!empty($skuArray)) {
+                    // Fetch products by SKUs using POST request
+                    $sendMessage(['type' => 'info', 'message' => 'Fetching products by SKUs...']);
 
-                $productResponse = Http::withHeaders([
-                    'Content-Type' => 'application/json',
-                    'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token,
-                ])->timeout(3600)->get('https://plugin-api.rugsimple.com/api/rug', [
-                    'limit' => $limit,
-                    'skip' => $skip,
-                ]);
+                    try {
+                        $productResponse = Http::withHeaders([
+                            'Content-Type' => 'application/json',
+                            'Accept' => 'application/json',
+                            'Authorization' => 'Bearer ' . $token,
+                        ])
+                            ->timeout(120) // Increased timeout to 120 seconds
+                            ->connectTimeout(30) // Connection timeout
+                            ->retry(3, 2000) // Retry 3 times with 2 second delay
+                            ->post('https://plugin-api.rugsimple.com/api/rug', [
+                                'ids' => $skuArray
+                            ]);
 
-                if (!$productResponse->successful()) {
+                        if (!$productResponse->successful()) {
+                            $sendMessage(['type' => 'error', 'message' => 'Failed to fetch products by SKUs. Status: ' . $productResponse->status()]);
+                            return;
+                        }
+                    } catch (\Exception $e) {
+                        $sendMessage(['type' => 'error', 'message' => 'Error fetching products by SKUs: ' . $e->getMessage()]);
+                        return;
+                    }
+                } else {
+                    // Fetch products using limit and skip
+                    $limit = $settings->product_limit ?? 10;
+                    $skip = $settings->product_skip ?? 0;
 
-                    $sendMessage(['type' => 'error', 'message' => 'Failed to fetch products.']);
-                    return;
+                    $sendMessage(['type' => 'info', 'message' => "Fetching products with limit: {$limit}, skip: {$skip}"]);
+
+                    try {
+                        $productResponse = Http::withHeaders([
+                            'Content-Type' => 'application/json',
+                            'Accept' => 'application/json',
+                            'Authorization' => 'Bearer ' . $token,
+                        ])
+                            ->timeout(120) // Increased timeout
+                            ->connectTimeout(30)
+                            ->retry(3, 2000)
+                            ->get('https://plugin-api.rugsimple.com/api/rug', [
+                                'limit' => $limit,
+                                'skip' => $skip,
+                            ]);
+
+                        if (!$productResponse->successful()) {
+                            $sendMessage(['type' => 'error', 'message' => 'Failed to fetch products. Status: ' . $productResponse->status()]);
+                            return;
+                        }
+                    } catch (\Exception $e) {
+                        $sendMessage(['type' => 'error', 'message' => 'Error fetching products: ' . $e->getMessage()]);
+                        return;
+                    }
                 }
 
                 $responseData = $productResponse->json();
                 $products = $responseData['data'] ?? [];
 
                 if (!$settings->shopify_store_url || !$settings->shopify_token) {
-
                     $sendMessage(['type' => 'error', 'message' => 'Shopify store URL or access token is missing.']);
                     return;
                 }
 
                 $shopifyDomain = rtrim($settings->shopify_store_url, '/');
-                $successCount = 0;
-                $skippedCount = 0;
 
                 // Process the product data
                 $processedProducts = $this->process_product_data($products);
 
                 $totalProducts = count($processedProducts);
-                $processed = 0;
 
+                if ($totalProducts === 0) {
+                    $sendMessage(['type' => 'info', 'message' => 'No products found to import.']);
+                    $sendMessage([
+                        'type' => 'complete',
+                        'progress' => 100,
+                        'message' => "No products to import",
+                        'success_count' => 0,
+                        'failure_count' => 0,
+                        'skipped_count' => 0,
+                    ]);
+
+                    echo "event: done\n";
+                    echo "data: [DONE]\n\n";
+                    @ob_flush();
+                    @flush();
+                    return;
+                }
+
+                $sendMessage(['type' => 'info', 'message' => "Found {$totalProducts} products to process."]);
+                $processed = 0;
 
                 foreach ($processedProducts as $index => $product) {
 
@@ -1019,7 +1087,7 @@ class SettingsController extends Controller
                             'product_type' => isset($product['constructionType']) && $product['constructionType'] !== '' ? ucfirst($product['constructionType']) : '',
                             "options" => [
                                 ["name" => "Size", "values" => [$size]],
-                                ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
+                                ["name" => "Color", "values" => !empty($variationColors) ? $variationColors : ['Default']],
                                 ["name" => "Nominal Size", "values" => [$nominalSize]],
                             ],
                             'images' => [],
@@ -1041,26 +1109,6 @@ class SettingsController extends Controller
                         }, $product['images'], array_keys($product['images']));
                     }
 
-
-
-                    // $metafields = [
-                    //     ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'packageheight',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'packagelength',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'packagewidth',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
-                    // ];
-
-                    // $metafields = [
-                    //     // Dimensions & Shipping Dimensions
-                    //     ['namespace' => 'custom', 'key' => 'height',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['height'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'length',         'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['length'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'width',          'type' => 'single_line_text_field', 'value' => (string)($product['dimension']['width'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'package_height',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['height'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'package_length',  'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['length'] ?? '')],
-                    //     ['namespace' => 'custom', 'key' => 'package_width',   'type' => 'single_line_text_field', 'value' => (string)($product['shipping']['width'] ?? '')],
-                    // ];
 
                     $metafields = [
                         // Dimensions
@@ -1280,7 +1328,7 @@ class SettingsController extends Controller
                     'skipped_count' => $skippedCount,
                 ]);
 
-                $sendMessage(['type' => 'info', 'message' => "Logs saved in {$logFilePath}"]);
+                //$sendMessage(['type' => 'info', 'message' => "Logs saved in {$logFilePath}"]);
 
                 echo "event: done\n";
                 echo "data: [DONE]\n\n";

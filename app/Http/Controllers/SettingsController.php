@@ -1094,6 +1094,7 @@ class SettingsController extends Controller
                             'tags' => implode(', ', array_unique($tags)),
                             "variants" => $variants,
                             'gift_card' => false,
+                            'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
                         ]
                     ];
 
@@ -1108,13 +1109,11 @@ class SettingsController extends Controller
                         }, $product['images'], array_keys($product['images']));
                     }
 
-                   $metafields = [
+                    $metafields = [
                         // Dimensions
                         ['namespace' => 'custom', 'key' => 'height', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['height'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'length', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['length'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'width', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['width'] ?? 0), 'unit' => 'INCHES'])],
-
-                        // Shipping Dimensions
                         ['namespace' => 'custom', 'key' => 'packageheight', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['height'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'packagelength', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['length'] ?? 0), 'unit' => 'INCHES'])],
                         ['namespace' => 'custom', 'key' => 'packagewidth', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['shipping']['width'] ?? 0), 'unit' => 'INCHES'])],
@@ -1173,6 +1172,14 @@ class SettingsController extends Controller
                         }
                     }
 
+                    // Sets the source value to identify products imported via the app
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key' => 'source',
+                        'type' => 'boolean',
+                        'value' => true
+                    ];
+
                     // Get existing metafields for this product
                     // save rental product price
                     $rental_price_data = $product['rental_price_value'];
@@ -1216,7 +1223,7 @@ class SettingsController extends Controller
                                     Http::withHeaders([
                                         'X-Shopify-Access-Token' => $settings->shopify_token,
                                         'Content-Type' => 'application/json',
-                                    ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                                    ])->timeout(3600)->retry(3, 1000)->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
                                         'metafield' => $metafield
                                     ]);
                                 }
@@ -1442,7 +1449,7 @@ class SettingsController extends Controller
         return false;
     }
 
-    private function checkProductBySkuOrTitle($settings, $shopifyDomain, $value = null, $action = 'title')
+    public function checkProductBySkuOrTitle($settings, $shopifyDomain, $value = null, $action = 'title')
     {
         if (!$value || !in_array($action, ['sku', 'title'])) {
             return false; // Invalid usage
@@ -1505,6 +1512,22 @@ class SettingsController extends Controller
 
 
         foreach ($products as $product) {
+
+
+            // $allowed_ids = [
+            //     '002853',
+            //     '004892',
+            //     '010301',
+            //     '016390',
+            //     '017724',
+            //     '018196',
+            //     '018531',
+            //     '018608'
+            // ];
+
+            // if (!in_array((string) $product['ID'], $allowed_ids, true)) {
+            //     continue;
+            // }
 
 
             //if (empty($product['collectionDocs'])) {

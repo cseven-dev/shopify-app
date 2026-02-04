@@ -156,27 +156,28 @@
         </form>
     </div>
 
-    <!-- <div class="bg-white shadow rounded-lg p-6 space-y-4">
-        <h3 class="text-lg font-semibold text-gray-800 mb-4">Product Updation</h3>
-        <div class="space-y-4">
-            <button id="updateProductsBtn"
-                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">
-                Update Product Title
-            </button>
-
-            <div id="updateStatus" class="hidden p-3 mt-2 rounded"></div>
-        </div>
-    </div> -->
-
     {{-- Card 3: Import Products --}}
     <div class="bg-white shadow rounded-lg p-6 space-y-4">
         <h3 class="text-lg font-semibold text-gray-800 mb-4">Import Products</h3>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-700">Import by SKUs</label>
+            <input type="text"  id="product_skus"  name="product_skus" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="e.g. SKU1,SKU2,SKU3">
+            <small class="form-text text-muted">
+                Enter comma-separated SKUs to import only specific products. Leave empty to import all products.
+            </small>
+        </div>
+
         <button id="import-products-btn"
             class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
             data-url="{{ route('import.products') }}"
             data-shop="{{ $shop ?? '' }}">
             Import Products
         </button>
+        <small class="form-text text-muted">
+           SKUs will be given priority if they are provided otherwise, the import will run based on the defined Product limit and Product skip values.
+        </small>
         <!-- Progress and Logs -->
         <div id="progress-wrapper" class="mt-6 space-y-4">
             <div id="progress-container" class="bg-white border rounded p-4 shadow hidden">

@@ -401,11 +401,11 @@ class DailyImportCommand extends Command
             }
 
             // Check if already exists by title
-            $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
-            if ($existingTitleProduct) {
-                $this->log("   ⏭️ Already exists by title");
-                return false;
-            }
+            // $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
+            // if ($existingTitleProduct) {
+            //     $this->log("   ⏭️ Already exists by title");
+            //     return false;
+            // }
 
             // Build tags
             $tags = $this->buildProductTags($product);

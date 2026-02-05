@@ -608,6 +608,20 @@ class SettingsController extends Controller
                 @flush();
             };
 
+            // === ADD RATE LIMITING HELPER HERE (RIGHT AFTER $sendMessage) ===
+            $lastRequestTime = microtime(true);
+            $shopifyRateLimit = function () use (&$lastRequestTime) {
+                $minDelay = 0.5; // 500ms = 2 requests per second max
+                $elapsed = microtime(true) - $lastRequestTime;
+
+                if ($elapsed < $minDelay) {
+                    usleep(($minDelay - $elapsed) * 1000000);
+                }
+
+                $lastRequestTime = microtime(true);
+            };
+            // === END OF RATE LIMITING HELPER ===
+
             try {
 
                 $sendMessage(['type' => 'info', 'message' => 'Starting product import...']);
@@ -876,22 +890,22 @@ class SettingsController extends Controller
                     }
 
                     // Check if product already exists in Shopify
-                    $existingTitleProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
+                    // $existingTitleProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
 
-                    if ($existingTitleProduct) {
-                        $logs[] = ['message' => '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
-                        $message = '⏭️ Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
-                        $skippedCount++;
+                    // if ($existingTitleProduct) {
+                    //     $logs[] = ['message' => '⏭Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
+                    //     $message = '⏭Skipped (Title : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
+                    //     $skippedCount++;
 
-                        $sendMessage([
-                            'progress' => $progress,
-                            'message' => $message,
-                            'type' => 'progress',
-                            'success' => false
-                        ]);
+                    //     $sendMessage([
+                    //         'progress' => $progress,
+                    //         'message' => $message,
+                    //         'type' => 'progress',
+                    //         'success' => false
+                    //     ]);
 
-                        continue;
-                    }
+                    //     continue;
+                    // }
 
                     // Prepare tags array
                     $tags = [];
@@ -1205,6 +1219,8 @@ class SettingsController extends Controller
                     }
 
                     try {
+
+                        $shopifyRateLimit();
                         // First create the product
                         $response = Http::withHeaders([
                             'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -1220,6 +1236,8 @@ class SettingsController extends Controller
                                 // Now add metafields (Shopify sometimes has issues with creating them in the same request)
 
                                 foreach ($metafields as $metafield) {
+
+                                    $shopifyRateLimit();
                                     Http::withHeaders([
                                         'X-Shopify-Access-Token' => $settings->shopify_token,
                                         'Content-Type' => 'application/json',
@@ -1232,6 +1250,8 @@ class SettingsController extends Controller
                                 $uniqueTags = array_unique($tags);
 
                                 foreach ($uniqueTags as $tagName) {
+
+                                    $shopifyRateLimit();
                                     // Check if collection exists
                                     $existingCollection = Http::withHeaders([
                                         'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -1244,6 +1264,8 @@ class SettingsController extends Controller
                                     if ($existingCollection->successful() && !empty($existingCollection['custom_collections'])) {
                                         $collectionId = $existingCollection['custom_collections'][0]['id'];
                                     } else {
+
+                                        $shopifyRateLimit();
                                         // Create the collection
                                         $createCollection = Http::withHeaders([
                                             'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -1263,6 +1285,8 @@ class SettingsController extends Controller
 
                                     // Assign product to collection
                                     if ($collectionId) {
+
+                                        $shopifyRateLimit();
                                         Http::withHeaders([
                                             'X-Shopify-Access-Token' => $settings->shopify_token,
                                             'Content-Type' => 'application/json',

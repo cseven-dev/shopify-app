@@ -1114,10 +1114,20 @@ class SettingsController extends Controller
 
                     // Add the first image as the featured image
 
+                    // if (!empty($product['images'])) {
+                    //     $shopifyProduct['product']['images'] = array_map(function ($imgUrl, $i) {
+                    //         return [
+                    //             'src' => $imgUrl,
+                    //             'position' => $i + 1,
+                    //         ];
+                    //     }, $product['images'], array_keys($product['images']));
+                    // }
+
+                    // Add the first image as the featured image
                     if (!empty($product['images'])) {
                         $shopifyProduct['product']['images'] = array_map(function ($imgUrl, $i) {
                             return [
-                                'src' => $imgUrl,
+                                'src' => str_replace(' ', '%20', $imgUrl), // Encode spaces in URL
                                 'position' => $i + 1,
                             ];
                         }, $product['images'], array_keys($product['images']));

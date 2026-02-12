@@ -39,8 +39,8 @@ class DailyImportCommand extends Command
                 $this->initLog($shop->shopify_store_url);
 
                 //if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
-                    //$this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
-                    //continue;
+                //$this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
+                //continue;
                 //}
 
                 if (!$shop->shopify_store_url || !$shop->api_key || !$shop->shopify_token) {
@@ -455,7 +455,10 @@ class DailyImportCommand extends Command
                         ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
                         ["name" => "Nominal Size", "values" => [$nominalSize]],
                     ],
-                    'images' => array_map(fn($imgUrl, $i) => ['src' => $imgUrl, 'position' => $i + 1], $product['images'], array_keys($product['images'])),
+                    'images' => array_map(fn($imgUrl, $i) => [
+                        'src' => str_replace(' ', '%20', $imgUrl),
+                        'position' => $i + 1
+                    ], $product['images'], array_keys($product['images'])),
                     'tags' => implode(', ', array_unique($tags)),
                     "variants" => $variants,
                     'status' => ($product['status'] ?? '') === 'available' ? 'active' : 'draft', // Set status based on Rug API
@@ -987,9 +990,11 @@ class DailyImportCommand extends Command
 
             // ===== STEP 5: UPDATE IMAGES =====
             if (!empty($rug['images'])) {
-                $this->log("      🔧 Updating images...");
+                $this->log("🔧 Updating images...");
 
-                $imagePayload = array_map(fn($img) => ['src' => $img], $rug['images']);
+                $imagePayload = array_map(fn($img) => [
+                    'src' => str_replace(' ', '%20', $img)  // <-- Encode spaces
+                ], $rug['images']);
 
                 $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
                     ->withHeaders([

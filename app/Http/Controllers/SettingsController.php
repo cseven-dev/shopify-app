@@ -556,6 +556,660 @@ class SettingsController extends Controller
         }
     }
 
+    private function buildProductTags(array $product): array
+    {
+        $tags = [];
+
+        // Product category
+        if (!empty($product['product_category'])) {
+            if ($product['product_category'] === 'both') {
+                $tags[] = 'Rugs for Rent';
+                $tags[] = 'Rugs for Sale';
+            } elseif ($product['product_category'] === 'rental') {
+                $tags[] = 'Rugs for Rent';
+            } elseif ($product['product_category'] === 'sale') {
+                $tags[] = 'Rugs for Sale';
+            }
+        }
+
+        // Taxonomy tag fields
+        $tagFields = [
+            'constructionType',
+            'country',
+            'primaryMaterial',
+            'design',
+            'palette',
+            'pattern',
+            'styleTags',
+            'foundation',
+            'region',
+            'rugType',
+            'productType',
+            'otherTags',
+        ];
+
+        foreach ($tagFields as $field) {
+            if (!empty($product[$field])) {
+                if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
+                    foreach (array_map('trim', explode(',', $product[$field])) as $value) {
+                        $tags[] = $value;
+                    }
+                } else {
+                    $tags[] = $product[$field];
+                }
+            }
+        }
+
+        // Size category tags
+        if (!empty($product['sizeCategoryTags'])) {
+            foreach (array_map('trim', explode(',', $product['sizeCategoryTags'])) as $tag) {
+                $tags[] = $tag;
+            }
+        }
+
+        // Shape category tags
+        if (!empty($product['shapeCategoryTags'])) {
+            foreach (array_map('trim', explode(',', $product['shapeCategoryTags'])) as $tag) {
+                $tags[] = $tag;
+            }
+        }
+
+        // Colour tags
+        if (!empty($product['colourTags'])) {
+            foreach (array_map('trim', explode(',', $product['colourTags'])) as $tag) {
+                $tags[] = $tag;
+            }
+        }
+
+        // Collection names
+        if (!empty($product['collectionDocs'])) {
+            foreach ($product['collectionDocs'] as $collection) {
+                if (!empty($collection['name'])) {
+                    $tags[] = trim($collection['name']);
+                }
+            }
+        }
+
+        // Category / subcategory
+        if (!empty($product['category'])) {
+            $tags[] = $product['category'];
+        }
+        if (!empty($product['subCategory'])) {
+            $tags[] = $product['subCategory'];
+        }
+
+        return array_values(array_unique($tags));
+    }
+
+    /**
+     * Find an existing Shopify product by SKU and update all its data.
+     *
+     * @param  array    $rug          Processed product data from the API
+     * @param  mixed    $settings     Settings model instance
+     * @param  callable $sendMessage  SSE logger callable (same one used in importProducts)
+     * @param  int      $progress     Current progress % (for SSE messages)
+     * @return bool
+     */
+    private function updateShopifyProduct(array $rug, $settings, callable $sendMessage, int $progress = 0): bool
+    {
+        $sku           = $rug['ID'];
+        $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+
+        $sendMessage([
+            'type'     => 'progress',
+            'progress' => $progress,
+            'message'  => "   🔧 Fetching existing Shopify product for SKU: {$sku}",
+        ]);
+
+        try {
+
+            // ===== STEP 1: FIND PRODUCT BY SKU =====
+            $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                ->get("https://{$shopifyDomain}/admin/api/2025-07/variants.json", [
+                    'sku' => $sku,
+                ]);
+
+            if (!$searchResponse->successful() || empty($searchResponse->json('variants'))) {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "   ❌ No Shopify product found for SKU: {$sku}",
+                    'success'  => false,
+                ]);
+                return false;
+            }
+
+            $variant   = $searchResponse->json('variants')[0];
+            $variantId = $variant['id'];
+            $productId = $variant['product_id'];
+
+            usleep(500000);
+
+            // ===== FETCH FULL PRODUCT =====
+            $productResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
+
+            if (!$productResponse->successful()) {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "   ❌ Failed to fetch full product for SKU: {$sku}",
+                    'success'  => false,
+                ]);
+                return false;
+            }
+
+            $fullProduct = $productResponse->json('product');
+
+            usleep(500000);
+
+            // ===== FETCH EXISTING METAFIELDS =====
+            $metafieldsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json");
+
+            $existingMetafields = [];
+            if ($metafieldsResponse->successful()) {
+                foreach ($metafieldsResponse->json('metafields') as $meta) {
+                    $existingMetafields[$meta['namespace'] . '.' . $meta['key']] = $meta;
+                }
+            }
+
+            usleep(500000);
+
+            $updatedFields = [];
+
+            // ===== PREPARE COMMON DATA =====
+            $size      = $rug['size'] ?? '';
+            $shapeTags = [];
+            if (!empty($rug['shapeCategoryTags'])) {
+                $shapeTags = array_map('ucfirst', array_map('trim', explode(',', $rug['shapeCategoryTags'])));
+            }
+
+            $nominalSize = $this->convertSizeToNominal($size);
+            if (!empty($shapeTags)) {
+                $nominalSize .= ' ' . implode(' ', $shapeTags);
+            }
+
+            $regularPrice = $rug['regularPrice'] ?? null;
+            $sellingPrice = $rug['sellingPrice'] ?? null;
+            $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
+
+            $updatedTitle = $rug['title'] . ' #' . $rug['ID'];
+            if (!empty($size)) {
+                $updatedTitle = $size . ' ' . $updatedTitle;
+            }
+
+            // ===== STEP 2: UPDATE PRODUCT BASIC INFO =====
+            $productPayload = [
+                'title'     => $updatedTitle,
+                'body_html' => '<p>' . ($rug['description'] ?? '') . '</p>',
+            ];
+
+            if (!empty($rug['vendor'])) {
+                $productPayload['vendor'] = $rug['vendor'];
+            }
+
+            if (!empty($rug['constructionType'])) {
+                $productPayload['product_type'] = ucfirst($rug['constructionType']);
+            }
+
+            $tags = $this->buildProductTags($rug);
+            if (!empty($tags)) {
+                $productPayload['tags'] = implode(',', array_unique($tags));
+            }
+
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                    'Content-Type'           => 'application/json',
+                ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                    'product' => $productPayload,
+                ]);
+
+            if ($response->successful()) {
+                $updatedFields[] = 'basic_info';
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ✓ Basic info updated",
+                ]);
+            } else {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ⚠️ Basic info update failed ({$response->status()}): " . $response->body(),
+                ]);
+            }
+
+            usleep(500000);
+
+            // ===== STEP 3: ENSURE PRODUCT OPTIONS EXIST =====
+            $currentOptions = $fullProduct['options'] ?? [];
+            $hasSize        = false;
+            $hasNominal     = false;
+            $needsOptions   = false;
+
+            foreach ($currentOptions as $option) {
+                $name = strtolower($option['name'] ?? '');
+                if ($name === 'size')         $hasSize    = true;
+                if ($name === 'nominal size') $hasNominal = true;
+            }
+
+            if (!$hasSize || !$hasNominal) {
+                $needsOptions   = true;
+                $optionsPayload = [
+                    ['name' => 'Size',         'values' => [$size ?: 'Default']],
+                    ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']],
+                ];
+
+                $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json',
+                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                        'product' => ['options' => $optionsPayload],
+                    ]);
+
+                if ($optionsResponse->successful()) {
+                    $updatedFields[] = 'options';
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ✓ Product options updated",
+                    ]);
+
+                    // Refresh full product after options change
+                    usleep(500000);
+                    $refreshResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                        ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
+
+                    if ($refreshResponse->successful()) {
+                        $fullProduct = $refreshResponse->json('product');
+                    }
+                } else {
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ⚠️ Options update failed ({$optionsResponse->status()}): " . $optionsResponse->body(),
+                    ]);
+                }
+
+                usleep(500000);
+            }
+
+            // ===== STEP 4: UPDATE VARIANT =====
+            $currentVariant = collect($fullProduct['variants'])->firstWhere('id', $variantId);
+
+            if (!$currentVariant) {
+                foreach ($fullProduct['variants'] as $v) {
+                    if ($v['sku'] === $sku) {
+                        $currentVariant = $v;
+                        $variantId      = $v['id'];
+                        break;
+                    }
+                }
+            }
+
+            if (!$currentVariant) {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ❌ Cannot find variant — aborting update for SKU: {$sku}",
+                    'success'  => false,
+                ]);
+                return false;
+            }
+
+            $variantPayload = [
+                'sku'                  => $sku,
+                'price'                => $currentPrice,
+                'option1'              => $size ?: 'Default',
+                'option2'              => $nominalSize ?: 'Default',
+                'compare_at_price'     => (
+                    !empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice
+                ) ? $regularPrice : null,
+                'inventory_management' => ($rug['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                'requires_shipping'    => true,
+                'taxable'              => true,
+                'fulfillment_service'  => 'manual',
+                'grams'                => $rug['weight_grams'] ?? 0,
+            ];
+
+            $variantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                    'Content-Type'           => 'application/json',
+                ])->put("https://{$shopifyDomain}/admin/api/2025-07/variants/{$variantId}.json", [
+                    'variant' => $variantPayload,
+                ]);
+
+            if ($variantResponse->successful()) {
+                $updatedFields[] = 'variant';
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ✓ Variant updated",
+                ]);
+            } else {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ⚠️ Variant update failed ({$variantResponse->status()}): " . $variantResponse->body(),
+                ]);
+            }
+
+            usleep(500000);
+
+            // ===== STEP 4.5: DELETE DUPLICATE/OLD VARIANTS =====
+            $allVariants = $fullProduct['variants'] ?? [];
+
+            if (count($allVariants) > 1) {
+                foreach ($allVariants as $v) {
+                    if ($v['id'] !== $variantId) {
+                        try {
+                            $deleteResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                                ->delete("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/variants/{$v['id']}.json");
+
+                            if ($deleteResponse->successful()) {
+                                $sendMessage([
+                                    'type'     => 'progress',
+                                    'progress' => $progress,
+                                    'message'  => "      ✓ Deleted duplicate variant ID: {$v['id']}",
+                                ]);
+                            } else {
+                                $sendMessage([
+                                    'type'     => 'progress',
+                                    'progress' => $progress,
+                                    'message'  => "      ⚠️ Failed to delete duplicate variant ID: {$v['id']} - " . $deleteResponse->body(),
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            $sendMessage([
+                                'type'     => 'progress',
+                                'progress' => $progress,
+                                'message'  => "      ⚠️ Exception deleting variant {$v['id']}: " . $e->getMessage(),
+                            ]);
+                        }
+
+                        usleep(500000);
+                    }
+                }
+            }
+
+            // ===== STEP 5: UPDATE INVENTORY =====
+            // Re-fetch variant to get fresh inventory_management value
+            try {
+                $freshVariantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                    ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                    ->get("https://{$shopifyDomain}/admin/api/2025-07/variants/{$variantId}.json");
+
+                if ($freshVariantResponse->successful()) {
+                    $currentVariant = $freshVariantResponse->json('variant');
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ✓ Variant re-fetched successfully",
+                    ]);
+                } else {
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ⚠️ Could not refresh variant ({$freshVariantResponse->status()}) — using cached data",
+                    ]);
+                }
+            } catch (\Exception $e) {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ⚠️ Variant re-fetch failed: " . $e->getMessage() . " — using cached data",
+                ]);
+            }
+
+            usleep(500000);
+
+            if (isset($rug['inventory']['quantityLevel'][0]['available'])) {
+                $newQuantity     = $rug['inventory']['quantityLevel'][0]['available'];
+                $inventoryItemId = $currentVariant['inventory_item_id'] ?? null;
+
+                if ($inventoryItemId && ($currentVariant['inventory_management'] ?? null) === 'shopify') {
+                    try {
+                        $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+
+                        if ($locationsResponse->successful() && !empty($locationsResponse->json('locations'))) {
+                            $locationId = $locationsResponse->json('locations')[0]['id'];
+
+                            usleep(300000);
+
+                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                                ->withHeaders([
+                                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    'Content-Type'           => 'application/json',
+                                ])->post("https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json", [
+                                    'location_id'       => $locationId,
+                                    'inventory_item_id' => $inventoryItemId,
+                                    'available'         => $newQuantity,
+                                ]);
+
+                            if ($invResponse->successful()) {
+                                $updatedFields[] = 'inventory';
+                                $sendMessage([
+                                    'type'     => 'progress',
+                                    'progress' => $progress,
+                                    'message'  => "      ✓ Inventory updated to {$newQuantity} units",
+                                ]);
+                            } else {
+                                $sendMessage([
+                                    'type'     => 'progress',
+                                    'progress' => $progress,
+                                    'message'  => "      ⚠️ Inventory update failed: " . $invResponse->body(),
+                                ]);
+                            }
+                        } else {
+                            $sendMessage([
+                                'type'     => 'progress',
+                                'progress' => $progress,
+                                'message'  => "      ⚠️ No locations found for inventory update",
+                            ]);
+                        }
+                    } catch (\Exception $e) {
+                        $sendMessage([
+                            'type'     => 'progress',
+                            'progress' => $progress,
+                            'message'  => "      ⚠️ Inventory update exception: " . $e->getMessage(),
+                        ]);
+                    }
+
+                    usleep(500000);
+                } else {
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ⚠️ Inventory skipped — inventory_management is: " . ($currentVariant['inventory_management'] ?? 'null'),
+                    ]);
+                }
+            }
+
+            // ===== STEP 6: UPDATE IMAGES =====
+            if (!empty($rug['images'])) {
+                try {
+                    $imagePayload = array_map(
+                        fn($img) => ['src' => str_replace(' ', '%20', $img)],
+                        $rug['images']
+                    );
+
+                    $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                        ->withHeaders([
+                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                            'Content-Type'           => 'application/json',
+                        ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                            'product' => ['images' => $imagePayload],
+                        ]);
+
+                    if ($imageResponse->successful()) {
+                        $updatedFields[] = 'images';
+                        $sendMessage([
+                            'type'     => 'progress',
+                            'progress' => $progress,
+                            'message'  => "      ✓ Images updated (" . count($rug['images']) . " images)",
+                        ]);
+                    } else {
+                        $sendMessage([
+                            'type'     => 'progress',
+                            'progress' => $progress,
+                            'message'  => "      ⚠️ Images update failed: " . $imageResponse->body(),
+                        ]);
+                    }
+                } catch (\Exception $e) {
+                    $sendMessage([
+                        'type'     => 'progress',
+                        'progress' => $progress,
+                        'message'  => "      ⚠️ Images update exception: " . $e->getMessage(),
+                    ]);
+                }
+
+                usleep(500000);
+            }
+
+            // ===== STEP 7: UPDATE METAFIELDS =====
+            $metaUpdates = 0;
+
+            // Dimension metafields
+            if (isset($rug['dimension'])) {
+                foreach (['length', 'width', 'height'] as $dim) {
+                    if (isset($rug['dimension'][$dim]) && $rug['dimension'][$dim] !== '') {
+                        $value   = json_encode(['value' => (float)$rug['dimension'][$dim], 'unit' => 'INCHES']);
+                        $metaKey = 'custom.' . $dim;
+                        $metaId  = $existingMetafields[$metaKey]['id'] ?? null;
+
+                        if ($metaId) {
+                            try {
+                                $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                                    ->withHeaders([
+                                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                                        'Content-Type'           => 'application/json',
+                                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$metaId}.json", [
+                                        'metafield' => ['value' => $value, 'type' => 'dimension'],
+                                    ]);
+
+                                if ($metaResponse->successful()) {
+                                    $metaUpdates++;
+                                }
+                            } catch (\Exception $e) {
+                                $sendMessage([
+                                    'type'     => 'progress',
+                                    'progress' => $progress,
+                                    'message'  => "      ⚠️ Dimension metafield {$dim} exception: " . $e->getMessage(),
+                                ]);
+                            }
+
+                            usleep(200000);
+                        }
+                    }
+                }
+            }
+
+            // Text metafields
+            $metaFieldMap = [
+                'sizeCategoryTags' => 'size_category_tags',
+                'cost'             => 'cost',
+                'condition'        => 'condition',
+                'constructionType' => 'construction_type',
+                'country'          => 'country',
+                'primaryMaterial'  => 'primary_material',
+                'design'           => 'design',
+                'palette'          => 'palette',
+                'pattern'          => 'pattern',
+                'styleTags'        => 'style_tags',
+                'colourTags'       => 'color_tags',
+                'region'           => 'region',
+                'rugType'          => 'rug_type',
+                'size'             => 'size',
+                'updated_at'       => 'updated_at',
+            ];
+
+            foreach ($metaFieldMap as $field => $key) {
+                if (array_key_exists($field, $rug) && $rug[$field] !== null && $rug[$field] !== '') {
+                    $value   = (string)$rug[$field];
+                    $metaKey = 'custom.' . $key;
+                    $metaId  = $existingMetafields[$metaKey]['id'] ?? null;
+
+                    if ($metaId) {
+                        try {
+                            $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                                ->withHeaders([
+                                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    'Content-Type'           => 'application/json',
+                                ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$metaId}.json", [
+                                    'metafield' => ['value' => $value, 'type' => 'single_line_text_field'],
+                                ]);
+
+                            if ($metaResponse->successful()) {
+                                $metaUpdates++;
+                            }
+                        } catch (\Exception $e) {
+                            $sendMessage([
+                                'type'     => 'progress',
+                                'progress' => $progress,
+                                'message'  => "      ⚠️ Metafield {$key} exception: " . $e->getMessage(),
+                            ]);
+                        }
+
+                        usleep(200000);
+                    }
+                }
+            }
+
+            if ($metaUpdates > 0) {
+                $updatedFields[] = "{$metaUpdates}_metafields";
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ✓ {$metaUpdates} metafields updated",
+                ]);
+            } else {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "      ℹ️ No metafields to update",
+                ]);
+            }
+
+            // ===== FINAL RESULT =====
+            if (!empty($updatedFields)) {
+                $sendMessage([
+                    'type'     => 'progress',
+                    'progress' => $progress,
+                    'message'  => "   ✅ Update completed for SKU {$sku}: " . implode(', ', $updatedFields),
+                    'success'  => true,
+                ]);
+                return true;
+            }
+
+            $sendMessage([
+                'type'     => 'progress',
+                'progress' => $progress,
+                'message'  => "   ⚠️ No fields were updated for SKU: {$sku}",
+                'success'  => false,
+            ]);
+            return false;
+        } catch (\Exception $e) {
+            $sendMessage([
+                'type'     => 'progress',
+                'progress' => $progress,
+                'message'  => "   ❌ Update exception for SKU {$sku}: " . $e->getMessage(),
+                'success'  => false,
+            ]);
+            return false;
+        }
+    }
+
     public function importProducts(Request $request)
     {
         $shop = $request->input('shop');
@@ -630,6 +1284,7 @@ class SettingsController extends Controller
                 $successCount = 0;
                 $failCount = 0;
                 $skippedCount = 0;
+                $updatedCount = 0;
 
                 // === Process SKUs if provided ===
                 $skuArray = [];
@@ -871,21 +1526,16 @@ class SettingsController extends Controller
                         continue; // Skip products without a product category
                     }
 
-                    // Check if product already exists in Shopify
+                    // Check if product already exists in Shopify having same sku
                     $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
 
                     if ($existingSkuProduct) {
-                        $logs[] = ['message' => '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled'), 'success' => false];
-                        $message = '⏭️ Skipped (Sku : exists): ' . ($product['title'] . ' (' . $sku . ')' ?? 'Untitled');
-                        $skippedCount++;
-
-                        $sendMessage([
-                            'progress' => $progress,
-                            'message' => $message,
-                            'type' => 'progress',
-                            'success' => false
-                        ]);
-
+                        $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress);
+                        if ($updateResult) {
+                            $updatedCount++;
+                        } else {
+                            $failCount++;
+                        }
                         continue;
                     }
 
@@ -935,7 +1585,7 @@ class SettingsController extends Controller
                         //'pile',
                         //'period',
                         'styleTags',
-                        //'otherTags',
+                        'otherTags',
                         'foundation',
                         //'age',
                         //'quality',
@@ -1032,56 +1682,79 @@ class SettingsController extends Controller
 
                     $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
 
+                    // //Build variants
+                    // $variants = [];
+                    // if (isset($variationColors) && !empty($variationColors)) {
+                    //     foreach ($variationColors as $color) {
+                    //         // Create variant data first
+                    //         $variantData = [
+                    //             "option1" => $size,
+                    //             "option2" => $color,
+                    //             "option3" => $nominalSize,
+                    //             "price" => $currentPrice,
+                    //             'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                    //             'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                    //             'sku' => $product['ID'] ?? '',
+                    //             "requires_shipping" => true,
+                    //             "taxable" => true,
+                    //             "fulfillment_service" => "manual",
+                    //             "grams" => $product['weight_grams'] ?? 0,
+                    //         ];
+
+                    //         // Only add compare_at_price if product is on sale
+                    //         if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                    //             $variantData['compare_at_price'] = $regularPrice;
+                    //         }
+
+                    //         // Add to variants array ONCE
+                    //         $variants[] = $variantData;
+                    //     }
+                    // } else {
+                    //     // If no colors, create a single variant
+                    //     $variantData = [
+                    //         "option1" => $size,
+                    //         "option2" => 'Default',
+                    //         "option3" => $nominalSize,
+                    //         "price" => $currentPrice,
+                    //         'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                    //         'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                    //         'sku' => $product['ID'] ?? '',
+                    //         "requires_shipping" => true,
+                    //         "taxable" => true,
+                    //         "fulfillment_service" => "manual",
+                    //         "grams" => $product['weight_grams'] ?? 0,
+                    //     ];
+
+                    //     // Only add compare_at_price if product is on sale
+                    //     if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                    //         $variantData['compare_at_price'] = $regularPrice;
+                    //     }
+
+                    //     $variants[] = $variantData;
+                    // }
+
+
                     // Build variants
-                    $variants = [];
-                    if (isset($variationColors) && !empty($variationColors)) {
-                        foreach ($variationColors as $color) {
-                            // Create variant data first
-                            $variantData = [
-                                "option1" => $size,
-                                "option2" => $color,
-                                "option3" => $nominalSize,
-                                "price" => $currentPrice,
-                                'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                                'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
-                                'sku' => $product['ID'] ?? '',
-                                "requires_shipping" => true,
-                                "taxable" => true,
-                                "fulfillment_service" => "manual",
-                                "grams" => $product['weight_grams'] ?? 0,
-                            ];
+                    $variantData = [
+                        "option1" => $size,
+                        "option2" => $nominalSize,
+                        "price" => $currentPrice,
+                        'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                        'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                        'sku' => $product['ID'] ?? '',
+                        "requires_shipping" => true,
+                        "taxable" => true,
+                        "fulfillment_service" => "manual",
+                        "grams" => $product['weight_grams'] ?? 0,
+                    ];
 
-                            // Only add compare_at_price if product is on sale
-                            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                                $variantData['compare_at_price'] = $regularPrice;
-                            }
-
-                            // Add to variants array ONCE
-                            $variants[] = $variantData;
-                        }
-                    } else {
-                        // If no colors, create a single variant
-                        $variantData = [
-                            "option1" => $size,
-                            "option2" => 'Default',
-                            "option3" => $nominalSize,
-                            "price" => $currentPrice,
-                            'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                            'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
-                            'sku' => $product['ID'] ?? '',
-                            "requires_shipping" => true,
-                            "taxable" => true,
-                            "fulfillment_service" => "manual",
-                            "grams" => $product['weight_grams'] ?? 0,
-                        ];
-
-                        // Only add compare_at_price if product is on sale
-                        if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                            $variantData['compare_at_price'] = $regularPrice;
-                        }
-
-                        $variants[] = $variantData;
+                    // Only add compare_at_price if product is on sale
+                    if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                        $variantData['compare_at_price'] = $regularPrice;
                     }
+
+                    $variants[] = $variantData;
+
 
 
                     $updatedTitle = $product['title'] . ' #' . $product['ID'];
@@ -1101,12 +1774,11 @@ class SettingsController extends Controller
                             'product_type' => isset($product['constructionType']) && $product['constructionType'] !== '' ? ucfirst($product['constructionType']) : '',
                             "options" => [
                                 ["name" => "Size", "values" => [$size]],
-                                ["name" => "Color", "values" => !empty($variationColors) ? $variationColors : ['Default']],
                                 ["name" => "Nominal Size", "values" => [$nominalSize]],
                             ],
                             'images' => [],
                             'tags' => implode(', ', array_unique($tags)),
-                            "variants" => $variants,
+                            "variants"     => $variants,
                             'gift_card' => false,
                             'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
                         ]
@@ -1257,57 +1929,57 @@ class SettingsController extends Controller
                                 }
 
                                 // Now add the product to collections based on tags
-                                $uniqueTags = array_unique($tags);
+                                //$uniqueTags = array_unique($tags);
 
-                                foreach ($uniqueTags as $tagName) {
+                                // foreach ($uniqueTags as $tagName) {
 
-                                    $shopifyRateLimit();
-                                    // Check if collection exists
-                                    $existingCollection = Http::withHeaders([
-                                        'X-Shopify-Access-Token' => $settings->shopify_token,
-                                    ])->timeout(3600)->get("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
-                                        'title' => $tagName
-                                    ]);
+                                //     $shopifyRateLimit();
+                                //     // Check if collection exists
+                                //     $existingCollection = Http::withHeaders([
+                                //         'X-Shopify-Access-Token' => $settings->shopify_token,
+                                //     ])->timeout(3600)->get("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
+                                //         'title' => $tagName
+                                //     ]);
 
-                                    $collectionId = null;
+                                //     $collectionId = null;
 
-                                    if ($existingCollection->successful() && !empty($existingCollection['custom_collections'])) {
-                                        $collectionId = $existingCollection['custom_collections'][0]['id'];
-                                    } else {
+                                //     if ($existingCollection->successful() && !empty($existingCollection['custom_collections'])) {
+                                //         $collectionId = $existingCollection['custom_collections'][0]['id'];
+                                //     } else {
 
-                                        $shopifyRateLimit();
-                                        // Create the collection
-                                        $createCollection = Http::withHeaders([
-                                            'X-Shopify-Access-Token' => $settings->shopify_token,
-                                            'Content-Type' => 'application/json',
-                                        ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
-                                            'custom_collection' => [
-                                                'title' => $tagName,
-                                                'body_html' => '<p>' . $tagName . ' collection</p>',
-                                                'published' => true
-                                            ]
-                                        ]);
+                                //         $shopifyRateLimit();
+                                //         // Create the collection
+                                //         $createCollection = Http::withHeaders([
+                                //             'X-Shopify-Access-Token' => $settings->shopify_token,
+                                //             'Content-Type' => 'application/json',
+                                //         ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/custom_collections.json", [
+                                //             'custom_collection' => [
+                                //                 'title' => $tagName,
+                                //                 'body_html' => '<p>' . $tagName . ' collection</p>',
+                                //                 'published' => true
+                                //             ]
+                                //         ]);
 
-                                        if ($createCollection->successful()) {
-                                            $collectionId = $createCollection['custom_collection']['id'];
-                                        }
-                                    }
+                                //         if ($createCollection->successful()) {
+                                //             $collectionId = $createCollection['custom_collection']['id'];
+                                //         }
+                                //     }
 
-                                    // Assign product to collection
-                                    if ($collectionId) {
+                                //     // Assign product to collection
+                                //     if ($collectionId) {
 
-                                        $shopifyRateLimit();
-                                        Http::withHeaders([
-                                            'X-Shopify-Access-Token' => $settings->shopify_token,
-                                            'Content-Type' => 'application/json',
-                                        ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/collects.json", [
-                                            'collect' => [
-                                                'product_id' => $productId,
-                                                'collection_id' => $collectionId
-                                            ]
-                                        ]);
-                                    }
-                                }
+                                //         $shopifyRateLimit();
+                                //         Http::withHeaders([
+                                //             'X-Shopify-Access-Token' => $settings->shopify_token,
+                                //             'Content-Type' => 'application/json',
+                                //         ])->timeout(3600)->post("https://{$shopifyDomain}/admin/api/2025-07/collects.json", [
+                                //             'collect' => [
+                                //                 'product_id' => $productId,
+                                //                 'collection_id' => $collectionId
+                                //             ]
+                                //         ]);
+                                //     }
+                                // }
 
                                 $logs[] = ['message' => '✅ Imported: ' . ($product['title'] ?? 'Untitled'), 'success' => true];
                                 $message = '✅ Imported: ' . ($product['title'] ?? 'Untitled');
@@ -1359,6 +2031,7 @@ class SettingsController extends Controller
                     'success_count' => $successCount,
                     'failure_count' => $failCount,
                     'skipped_count' => $skippedCount,
+                    'updated_count' => $updatedCount,
                 ]);
 
                 //$sendMessage(['type' => 'info', 'message' => "Logs saved in {$logFilePath}"]);

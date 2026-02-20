@@ -144,8 +144,7 @@ class DailyImportCommand extends Command
         $this->log("📋 Total SKUs to process: {$stats['recently_updated']} (in " . count($batches) . " batches)");
 
         foreach ($batches as $batchNumber => $batch) {
-            $this->log("
-🔄 Processing batch " . ($batchNumber + 1) . "/" . count($batches) . " (" . count($batch) . " products)");
+            $this->log("🔄 Processing batch " . ($batchNumber + 1) . "/" . count($batches) . " (" . count($batch) . " products)");
 
             foreach ($batch as $rugProduct) {
                 $sku = $rugProduct['ID'] ?? '';
@@ -157,8 +156,7 @@ class DailyImportCommand extends Command
                 }
 
                 try {
-                    $this->log("
-📦 Processing SKU: {$sku}");
+                    $this->log("📦 Processing SKU: {$sku}");
 
                     // Check if product exists in Shopify
                     $shopifyProduct = $this->getShopifyProductBySKU($shop, $sku);
@@ -293,8 +291,7 @@ class DailyImportCommand extends Command
         $this->log("🔄 Updated: {$stats['updated']}");
         $this->log("📴 Unpublished: {$stats['unpublished']}");
         $this->log("❌ Errors: {$stats['errors']}");
-        $this->log("════════════════════════════════════════════════════════════════
-");
+        $this->log("════════════════════════════════════════════════════════════════");
     }
 
     /**
@@ -452,7 +449,6 @@ class DailyImportCommand extends Command
                     'product_type' => isset($product['constructionType']) ? ucfirst($product['constructionType']) : '',
                     "options" => [
                         ["name" => "Size", "values" => [$size]],
-                        ["name" => "Color", "values" => !empty($colors) ? $colors : ['Default']],
                         ["name" => "Nominal Size", "values" => [$nominalSize]],
                     ],
                     'images' => array_map(fn($imgUrl, $i) => [
@@ -500,7 +496,7 @@ class DailyImportCommand extends Command
                 usleep(200000); // Rate limit
             }
 
-            $this->log("   ✅ Product created successfully - ID: {$productId}");
+            $this->log("✅ Product created successfully - ID: {$productId}");
             return true;
         } catch (\Exception $e) {
             $this->log("   ❌ Exception: " . $e->getMessage());
@@ -540,7 +536,8 @@ class DailyImportCommand extends Command
             'foundation',
             'region',
             'rugType',
-            'productType'
+            'productType',
+            'otherTags'
         ];
 
         foreach ($tagFields as $field) {
@@ -591,53 +588,26 @@ class DailyImportCommand extends Command
     /**
      * Build variants array
      */
-    private function buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice)
+    private function buildVariants($product, $size, $nominalSize, $currentPrice, $regularPrice, $sellingPrice)
     {
-        $variants = [];
+        $variantData = [
+            "option1"              => $size ?: 'Default',
+            "option2"              => $nominalSize ?: 'Default',
+            "price"                => $currentPrice,
+            'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+            'inventory_quantity'   => $product['inventory']['quantityLevel'][0]['available'] ?? 0,
+            'sku'                  => $product['ID'] ?? '',
+            "requires_shipping"    => true,
+            "taxable"              => true,
+            "fulfillment_service"  => "manual",
+            "grams"                => $product['weight_grams'] ?? 0,
+        ];
 
-        if (!empty($colors)) {
-            foreach ($colors as $color) {
-                $variantData = [
-                    "option1" => $size,
-                    "option2" => $color,
-                    "option3" => $nominalSize,
-                    "price" => $currentPrice,
-                    'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                    'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? 0,
-                    'sku' => $product['ID'] ?? '',
-                    "requires_shipping" => true,
-                    "taxable" => true,
-                    "grams" => $product['weight_grams'] ?? 0,
-                ];
-
-                if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                    $variantData['compare_at_price'] = $regularPrice;
-                }
-
-                $variants[] = $variantData;
-            }
-        } else {
-            $variantData = [
-                "option1" => $size,
-                "option2" => 'Default',
-                "option3" => $nominalSize,
-                "price" => $currentPrice,
-                'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? 0,
-                'sku' => $product['ID'] ?? '',
-                "requires_shipping" => true,
-                "taxable" => true,
-                "grams" => $product['weight_grams'] ?? 0,
-            ];
-
-            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
-                $variantData['compare_at_price'] = $regularPrice;
-            }
-
-            $variants[] = $variantData;
+        if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+            $variantData['compare_at_price'] = $regularPrice;
         }
 
-        return $variants;
+        return [$variantData];
     }
 
     /**
@@ -739,7 +709,7 @@ class DailyImportCommand extends Command
      */
     private function updateShopifyProduct(array $rug, array $shopifyData, $settings)
     {
-        $this->log("   🔧 Updating product...");
+        $this->log("🔧 Updating product...");
 
         try {
             $productId = $shopifyData['product_id'];
@@ -822,27 +792,22 @@ class DailyImportCommand extends Command
 
             // Check if we have all 3 options
             $hasSize = false;
-            $hasColor = false;
             $hasNominal = false;
 
             foreach ($currentOptions as $option) {
                 $optionName = strtolower($option['name'] ?? '');
                 if ($optionName === 'size') $hasSize = true;
-                if ($optionName === 'color') $hasColor = true;
                 if ($optionName === 'nominal size') $hasNominal = true;
             }
 
-            if (!$hasSize || !$hasColor || !$hasNominal) {
+            if (!$hasSize || !$hasNominal) {
                 $needsOptions = true;
-                $this->log("      ⚠️ Missing product options - will add them");
+                $this->log("⚠️ Missing product options - will add them");
 
                 // Add missing options
                 $optionsPayload = [];
                 if (!$hasSize) {
                     $optionsPayload[] = ['name' => 'Size', 'values' => [$size ?: 'Default']];
-                }
-                if (!$hasColor) {
-                    $optionsPayload[] = ['name' => 'Color', 'values' => !empty($colors) ? $colors : ['Default']];
                 }
                 if (!$hasNominal) {
                     $optionsPayload[] = ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']];
@@ -860,7 +825,7 @@ class DailyImportCommand extends Command
                     ]);
 
                 if ($optionsResponse->successful()) {
-                    $this->log("      ✓ Product options added");
+                    $this->log("✓ Product options added");
                     $updatedFields[] = 'options_added';
 
                     // Refresh product data
@@ -872,18 +837,18 @@ class DailyImportCommand extends Command
                         $fullProduct = $refreshResponse->json('product');
                     }
                 } else {
-                    $this->log("      ⚠️ Failed to add options - Status: " . $optionsResponse->status());
+                    $this->log("⚠️ Failed to add options - Status: " . $optionsResponse->status());
                 }
 
                 usleep(500000);
             }
 
             // ===== STEP 3: UPDATE VARIANT =====
-            $this->log("      🔧 Updating variant...");
+            $this->log("🔧 Updating variant...");
 
             $currentVariant = collect($fullProduct['variants'])->firstWhere('id', $variantId);
             if (!$currentVariant) {
-                $this->log("      ⚠️ Variant not found after refresh");
+                $this->log("⚠️ Variant not found after refresh");
                 // Try to find by SKU
                 foreach ($fullProduct['variants'] as $v) {
                     if ($v['sku'] === $rug['ID']) {
@@ -894,7 +859,7 @@ class DailyImportCommand extends Command
                 }
 
                 if (!$currentVariant) {
-                    $this->log("      ❌ Cannot find variant - skipping variant update");
+                    $this->log("❌ Cannot find variant - skipping variant update");
                     return false;
                 }
             }
@@ -908,11 +873,8 @@ class DailyImportCommand extends Command
             if ($hasSize || $needsOptions) {
                 $variantPayload['option1'] = $size ?: 'Default';
             }
-            if ($hasColor || $needsOptions) {
-                $variantPayload['option2'] = !empty($colors) ? $colors[0] : 'Default';
-            }
             if ($hasNominal || $needsOptions) {
-                $variantPayload['option3'] = $nominalSize ?: 'Default';
+                $variantPayload['option2'] = $nominalSize ?: 'Default';
             }
 
             if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
@@ -1015,7 +977,7 @@ class DailyImportCommand extends Command
             }
 
             // ===== STEP 6: UPDATE METAFIELDS =====
-            $this->log("      🔧 Updating metafields...");
+            $this->log("🔧 Updating metafields...");
 
             $existingMetafields = [];
             foreach ($shopifyData['metafields'] as $meta) {

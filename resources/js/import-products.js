@@ -5,7 +5,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const progressBar = document.getElementById('progress-bar');
     const logList = document.getElementById('log-list');
     const logsContainer = document.getElementById('import-logs');
-     const productSkusInput = document.getElementById('product_skus');
+    const productSkusInput = document.getElementById('product_skus');
 
     if (importBtn) {
         importBtn.addEventListener('click', function (e) {
@@ -60,7 +60,7 @@ document.addEventListener('DOMContentLoaded', function () {
                         progressBar.style.width = '100%';
                         progressBar.textContent = '100%';
                         progressText.textContent = data.message;
-                        addLogItem(`✅ ${data.message} - Success: ${data.success_count}, Failed: ${data.failure_count}, Skipped: ${data.skipped_count}`, 'success');
+                        addLogItem(`✅ ${data.message} - Success: ${data.success_count}, Failed: ${data.failure_count}, Skipped: ${data.skipped_count}, Updated: ${data.updated_count}`, 'success');
                         eventSource.close();
                         importBtn.disabled = false;
                         importBtn.innerHTML = '📦 Import Products';

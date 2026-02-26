@@ -658,10 +658,15 @@ class SettingsController extends Controller
      *     Sets inventory_management='shopify' on variant first, THEN calls inventory_levels/set.
      *  3. Tags, metafields (upsert), images, status all fully updated.
      */
-    private function updateShopifyProduct(array $rug, $settings, callable $sendMessage, int $progress = 0): bool
+    private function updateShopifyProduct(array $rug, $settings, callable $sendMessage, int $progress = 0, ?callable $rateLimiter = null, ?int $cachedLocationId = null): bool
     {
         $sku           = $rug['ID'];
         $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+
+        // Use provided rate limiter or create a local one
+        $shopifyRateLimit = $rateLimiter ?? function () {
+            usleep(550000); // 550ms fallback
+        };
 
         $sendMessage([
             'type'     => 'progress',
@@ -687,7 +692,7 @@ class SettingsController extends Controller
             $variantId      = $matchedVariant['id'];
             $productId      = $matchedVariant['product_id'];
 
-            usleep(400000);
+            $shopifyRateLimit();
 
             // ============================================================
             // STEP 2: FETCH FULL PRODUCT
@@ -702,7 +707,7 @@ class SettingsController extends Controller
             }
 
             $fullProduct = $productResponse->json('product');
-            usleep(400000);
+            $shopifyRateLimit();
 
             // ============================================================
             // STEP 3: FETCH EXISTING METAFIELDS
@@ -718,7 +723,7 @@ class SettingsController extends Controller
                 }
             }
 
-            usleep(400000);
+            $shopifyRateLimit();
 
             $updatedFields = [];
 
@@ -828,7 +833,7 @@ class SettingsController extends Controller
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Basic info failed ({$basicResponse->status()}): " . $basicResponse->body()]);
             }
 
-            usleep(400000);
+            $shopifyRateLimit();
 
             // ============================================================
             // STEP 5: ENSURE OPTIONS (Size + Nominal Size)
@@ -856,7 +861,7 @@ class SettingsController extends Controller
                 if ($optResponse->successful()) {
                     $updatedFields[] = 'options';
                     $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Options set (Size / Nominal Size)"]);
-                    usleep(400000);
+                    $shopifyRateLimit();
                     $refresh = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                         ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                         ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
@@ -866,7 +871,7 @@ class SettingsController extends Controller
                 } else {
                     $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Options update failed: " . $optResponse->body()]);
                 }
-                usleep(400000);
+                $shopifyRateLimit();
             }
 
             // ============================================================
@@ -918,9 +923,7 @@ class SettingsController extends Controller
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Variant update failed ({$variantResponse->status()}): " . $variantResponse->body()]);
             }
 
-            usleep(400000);
-
-            usleep(400000);
+            $shopifyRateLimit();
 
             // 🔥 Always refresh variant directly
             $variantRefresh = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
@@ -960,7 +963,7 @@ class SettingsController extends Controller
                         } catch (\Exception $e) {
                             $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Delete variant exception: " . $e->getMessage()]);
                         }
-                        usleep(400000);
+                        $shopifyRateLimit();
                     }
                 }
             }
@@ -981,23 +984,26 @@ class SettingsController extends Controller
             } elseif (!$manageStock) {
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ℹ️ manageStock=false — skipping inventory"]);
             } else {
-                $locationId = null;
-                try {
-                    $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
-                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                        ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+                $locationId = $cachedLocationId;
+                if (!$locationId) {
+                    try {
+                        $shopifyRateLimit();
+                        $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-                    if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
-                        $locationId = $locResponse->json('locations')[0]['id'];
-                        $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Location: {$locationId}"]);
-                    } else {
-                        $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ No locations found"]);
+                        if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                            $locationId = $locResponse->json('locations')[0]['id'];
+                            $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Location: {$locationId}"]);
+                        } else {
+                            $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ No locations found"]);
+                        }
+                    } catch (\Exception $e) {
+                        $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Location fetch failed: " . $e->getMessage()]);
                     }
-                } catch (\Exception $e) {
-                    $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Location fetch failed: " . $e->getMessage()]);
                 }
 
-                usleep(400000);
+                $shopifyRateLimit();
 
                 if ($locationId && $inventoryItemId) {
                     try {
@@ -1010,7 +1016,7 @@ class SettingsController extends Controller
                                 'inventory_item_id' => $inventoryItemId,
                             ]);
 
-                        usleep(300000);
+                        $shopifyRateLimit();
 
 
                         $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
@@ -1030,7 +1036,7 @@ class SettingsController extends Controller
                     } catch (\Exception $e) {
                         $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Inventory exception: " . $e->getMessage()]);
                     }
-                    usleep(400000);
+                    $shopifyRateLimit();
                 }
             }
 
@@ -1056,7 +1062,7 @@ class SettingsController extends Controller
                 } catch (\Exception $e) {
                     $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Images exception: " . $e->getMessage()]);
                 }
-                usleep(400000);
+                $shopifyRateLimit();
             }
 
             // ============================================================
@@ -1088,10 +1094,10 @@ class SettingsController extends Controller
                             $existingMetafields[$lookupKey] = $r->json('metafield');
                         }
                     }
-                    usleep(150000);
+                    usleep(550000);
                     return $r->successful();
                 } catch (\Exception $e) {
-                    usleep(150000);
+                    usleep(550000);
                     return false;
                 }
             };
@@ -1190,7 +1196,27 @@ class SettingsController extends Controller
                 Http::timeout(60)->connectTimeout(30)
                     ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token, 'Content-Type' => 'application/json'])
                     ->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
-                        'metafield' => ['namespace' => 'custom', 'key' => 'source', 'type' => 'boolean', 'value' => 'true'],
+                        'metafield' => [
+                            'namespace' => 'custom',
+                            'key'       => 'source',
+                            'type'      => 'boolean',
+                            'value'     => 'true', // ✅ fixed: string instead of boolean
+                        ],
+                    ]);
+            } else {
+                $metafieldId = $existingMetafields['custom.source']['id'];
+
+                Http::timeout(60)->connectTimeout(30)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json'
+                    ])
+                    ->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$metafieldId}.json", [
+                        'metafield' => [
+                            'id'    => $metafieldId,
+                            'type'  => 'boolean',
+                            'value' => 'true', // ✅ fixed: string instead of boolean
+                        ],
                     ]);
             }
 
@@ -1278,7 +1304,7 @@ class SettingsController extends Controller
             // === ADD RATE LIMITING HELPER HERE (RIGHT AFTER $sendMessage) ===
             $lastRequestTime = microtime(true);
             $shopifyRateLimit = function () use (&$lastRequestTime) {
-                $minDelay = 0.5; // 500ms = 2 requests per second max
+                $minDelay = 0.55; // 550ms — stays safely under 2 requests/second
                 $elapsed = microtime(true) - $lastRequestTime;
 
                 if ($elapsed < $minDelay) {
@@ -1448,6 +1474,22 @@ class SettingsController extends Controller
                 $sendMessage(['type' => 'info', 'message' => "Found {$totalProducts} products to process."]);
                 $processed = 0;
 
+                // Pre-fetch location ID once (avoids calling locations.json per product)
+                $cachedLocationId = null;
+                try {
+                    $shopifyRateLimit();
+                    $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                        ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+
+                    if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                        $cachedLocationId = $locResponse->json('locations')[0]['id'];
+                        $sendMessage(['type' => 'info', 'message' => "✓ Location pre-fetched: {$cachedLocationId}"]);
+                    }
+                } catch (\Exception $e) {
+                    $sendMessage(['type' => 'info', 'message' => "⚠️ Could not pre-fetch location: " . $e->getMessage()]);
+                }
+
                 foreach ($processedProducts as $index => $product) {
 
                     $processed++;
@@ -1543,7 +1585,7 @@ class SettingsController extends Controller
                     $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
 
                     if ($existingSkuProduct) {
-                        $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress);
+                        $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress, $shopifyRateLimit, $cachedLocationId);
                         if ($updateResult) {
                             $updatedCount++;
                         } else {

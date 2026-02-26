@@ -37,10 +37,6 @@ class DailyImportCommand extends Command
             foreach ($shops as $shop) {
                 $this->initLog($shop->shopify_store_url);
 
-                if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
-                    $this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
-                    continue;
-                }
 
                 if (!$shop->shopify_store_url || !$shop->api_key || !$shop->shopify_token) {
                     $this->log("⚠️ Skipping shop (missing credentials): {$shop->shopify_store_url}");

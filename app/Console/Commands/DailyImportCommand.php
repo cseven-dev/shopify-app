@@ -20,8 +20,7 @@ class DailyImportCommand extends Command
 
     public function handle()
     {
-        $this->log("
-╔══════════════════════════════════════════════════════════════╗");
+        $this->log("╔══════════════════════════════════════════════════════════════╗");
         $this->log("║              DAILY PRODUCT IMPORT STARTED                    ║");
         $this->log("╚══════════════════════════════════════════════════════════════╝");
         $this->log("Started at: " . now()->format('Y-m-d H:i:s'));
@@ -38,10 +37,10 @@ class DailyImportCommand extends Command
             foreach ($shops as $shop) {
                 $this->initLog($shop->shopify_store_url);
 
-                //if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
-                //$this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
-                //continue;
-                //}
+                if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
+                    $this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
+                    continue;
+                }
 
                 if (!$shop->shopify_store_url || !$shop->api_key || !$shop->shopify_token) {
                     $this->log("⚠️ Skipping shop (missing credentials): {$shop->shopify_store_url}");
@@ -49,15 +48,13 @@ class DailyImportCommand extends Command
                 }
 
                 try {
-                    $this->log("
-════════════════════════════════════════════════════════════════");
+                    $this->log("════════════════════════════════════════════════════════════════");
                     $this->log("🏪 SHOP: {$shop->shopify_store_url}");
                     $this->log("════════════════════════════════════════════════════════════════");
 
                     $this->processShop($shop);
 
-                    $this->log("
-✅ Cron completed successfully for {$shop->shopify_store_url}");
+                    $this->log("✅ Cron completed successfully for {$shop->shopify_store_url}");
                 } catch (\Exception $innerEx) {
                     $this->log("❌ Error processing {$shop->shopify_store_url}: " . $innerEx->getMessage());
                     $this->log("   Stack trace: " . $innerEx->getTraceAsString());
@@ -163,7 +160,7 @@ class DailyImportCommand extends Command
 
                     if (!$shopifyProduct) {
                         // Product not found - insert new
-                        $this->log("   ⊘ Not found in Shopify - inserting new product");
+                        $this->log("⊘ Not found in Shopify - inserting new product");
 
                         $inserted = $this->insertNewProduct($rugProduct, $shop->shopify_store_url);
 
@@ -355,69 +352,82 @@ class DailyImportCommand extends Command
     /**
      * Insert new product - SIMPLIFIED with better error handling
      */
-    private function insertNewProduct($product, $shopUrl)
+
+    /**
+     * insertNewProduct — used by the cron job to create a new Shopify product.
+     *
+     * Fully consistent with importProducts() and updateShopifyProduct():
+     *  - Same tag logic
+     *  - Same single variant structure (isSingleItem=true)
+     *  - Same metafield list (dimensions, shipping dims, 30+ text fields, rental price, source flag)
+     *  - Inventory set via inventory_levels/set AFTER creation (not via inventory_quantity on variant)
+     *  - Status: active if available qty > 0 AND status === 'available', else draft
+     */
+    private function insertNewProduct(array $product, string $shopUrl): bool
     {
         try {
+            // ============================================================
+            // SETUP
+            // ============================================================
             $settings = Setting::where('shopify_store_url', $shopUrl)->first();
-            if (!$settings) {
-                $this->log("   ❌ Settings not found for shop");
-                return false;
-            }
-
             $settingsController = new SettingsController();
-            $sku = $product['ID'] ?? null;
-
-            // Validation
-            if (!$sku) {
-                $this->log("   ❌ Missing SKU");
-                return false;
-            }
-
-            if (empty($product['title'])) {
-                $this->log("   ❌ Missing title");
-                return false;
-            }
-
-            if (empty($product['regularPrice'])) {
-                $this->log("   ❌ Missing regular price");
-                return false;
-            }
-
-            if (empty($product['images'])) {
-                $this->log("   ❌ Missing images");
+            if (!$settings) {
+                $this->log("❌ Settings not found for shop: {$shopUrl}");
                 return false;
             }
 
             $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+            $sku           = $product['ID'] ?? null;
 
-            // Check if already exists by SKU
-            $existingSkuProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
-            if ($existingSkuProduct) {
-                $this->log("   ⏭️ Already exists by SKU");
+            // ============================================================
+            // VALIDATION
+            // ============================================================
+            if (!$sku) {
+                $this->log("❌ Missing SKU — skipping product");
                 return false;
             }
 
-            // Check if already exists by title
-            // $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
-            // if ($existingTitleProduct) {
-            //     $this->log("   ⏭️ Already exists by title");
+            if (empty($product['title'])) {
+                $this->log("❌ [{$sku}] Missing title");
+                return false;
+            }
+
+            if (empty($product['regularPrice'])) {
+                $this->log("❌ [{$sku}] Missing regular price");
+                return false;
+            }
+
+            if (empty($product['product_category'])) {
+                $this->log("❌ [{$sku}] Missing product_category (rental/sale/both)");
+                return false;
+            }
+
+            if (empty($product['images'])) {
+                $this->log("❌ [{$sku}] Missing images");
+                return false;
+            }
+
+            // ============================================================
+            // CHECK IF ALREADY EXISTS BY SKU
+            // ============================================================
+            // $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            //     ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+            //     ->get("https://{$shopifyDomain}/admin/api/2025-07/variants.json", ['sku' => $sku]);
+
+            // if ($searchResponse->successful() && !empty($searchResponse->json('variants'))) {
+            //     $this->log("⏭️ [{$sku}] Already exists in Shopify — skipping insert");
             //     return false;
             // }
 
-            // Build tags
-            $tags = $this->buildProductTags($product);
+            // usleep(400000);
 
-            // Get prices
-            $regularPrice = $product['regularPrice'] ?? '0.00';
-            $sellingPrice = $product['sellingPrice'] ?? null;
-            $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
-
-            // Get size data
-            $size = $product['size'] ?? '';
+            // ============================================================
+            // PREPARE SHARED DATA
+            // ============================================================
+            $size      = $product['size'] ?? '';
             $shapeTags = [];
             if (!empty($product['shapeCategoryTags'])) {
-                $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
-                $shapeTags = array_map('ucfirst', $shapeTags);
+                $shapeTags = array_map('ucfirst', array_map('trim', explode(',', $product['shapeCategoryTags'])));
             }
 
             $nominalSize = $settingsController->convertSizeToNominal($size);
@@ -425,85 +435,517 @@ class DailyImportCommand extends Command
                 $nominalSize .= ' ' . implode(' ', $shapeTags);
             }
 
-            // Get colors
-            $colors = [];
-            if (!empty($product['colourTags'])) {
-                $colors = array_map('trim', explode(',', $product['colourTags']));
-            }
+            $regularPrice   = $product['regularPrice'] ?? '0.00';
+            $sellingPrice   = $product['sellingPrice'] ?? null;
+            $currentPrice   = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
+            $compareAtPrice = (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice)
+                ? $regularPrice : null;
 
-            // Build variants
-            $variants = $this->buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice);
+            // Inventory: single quantityLevel[0].available — no per-sku breakdown in your API
+            $newQty      = (int)($product['inventory']['quantityLevel'][0]['available'] ?? 0);
+            $manageStock = ($product['inventory']['manageStock'] ?? false) === true;
 
-            // Build title
+            // Status: draft if out of stock, active only if available AND status=available
+            $status = ($newQty <= 0) ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft');
+
+            // Title
             $updatedTitle = $product['title'] . ' #' . $sku;
             if (!empty($size)) {
                 $updatedTitle = $size . ' ' . $updatedTitle;
             }
 
-            // Build product payload
-            $shopifyProduct = [
-                "product" => [
-                    'title' => $updatedTitle,
-                    'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
-                    'vendor' => $product['vendor'] ?? 'Oriental Rug Mart',
-                    'product_type' => isset($product['constructionType']) ? ucfirst($product['constructionType']) : '',
-                    "options" => [
-                        ["name" => "Size", "values" => [$size]],
-                        ["name" => "Nominal Size", "values" => [$nominalSize]],
-                    ],
-                    'images' => array_map(fn($imgUrl, $i) => [
-                        'src' => str_replace(' ', '%20', $imgUrl),
-                        'position' => $i + 1
-                    ], $product['images'], array_keys($product['images'])),
-                    'tags' => implode(', ', array_unique($tags)),
-                    "variants" => $variants,
-                    'status' => ($product['status'] ?? '') === 'available' ? 'active' : 'draft', // Set status based on Rug API
-                ]
+            // ============================================================
+            // BUILD TAGS (identical to importProducts + updateShopifyProduct)
+            // ============================================================
+            $tags = [];
+
+            if (!empty($product['product_category'])) {
+                if ($product['product_category'] === 'both') {
+                    $tags[] = 'Rugs for Rent';
+                    $tags[] = 'Rugs for Sale';
+                } elseif ($product['product_category'] === 'rental') {
+                    $tags[] = 'Rugs for Rent';
+                } elseif ($product['product_category'] === 'sale') {
+                    $tags[] = 'Rugs for Sale';
+                }
+            }
+
+            foreach (['constructionType', 'country', 'primaryMaterial', 'design', 'palette', 'pattern', 'styleTags', 'otherTags', 'foundation', 'region', 'rugType', 'productType'] as $field) {
+                if (!empty($product[$field])) {
+                    if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
+                        foreach (array_map('trim', explode(',', $product[$field])) as $v) {
+                            $tags[] = $v;
+                        }
+                    } else {
+                        $tags[] = $product[$field];
+                    }
+                }
+            }
+
+            foreach (['sizeCategoryTags', 'shapeCategoryTags', 'colourTags'] as $field) {
+                if (!empty($product[$field])) {
+                    foreach (array_map('trim', explode(',', $product[$field])) as $t) {
+                        $tags[] = $t;
+                    }
+                }
+            }
+
+            if (!empty($product['collectionDocs'])) {
+                foreach ($product['collectionDocs'] as $col) {
+                    if (!empty($col['name'])) {
+                        $tags[] = trim($col['name']);
+                    }
+                }
+            }
+
+            if (!empty($product['category'])) {
+                $tags[] = $product['category'];
+            }
+            if (!empty($product['subCategory'])) {
+                $tags[] = $product['subCategory'];
+            }
+
+            // ============================================================
+            // BUILD SINGLE VARIANT
+            // isSingleItem=true: one variant per product with Size + Nominal Size options.
+            // Do NOT set inventory_quantity here — we use inventory_levels/set after creation.
+            // inventory_management='shopify' is required so the set call works.
+            // ============================================================
+            $variant = [
+                'sku'                  => $sku,
+                'price'                => $currentPrice,
+                'option1'              => $size ?: 'Default',
+                'option2'              => $nominalSize ?: 'Default',
+                'inventory_management' => $manageStock ? 'shopify' : null,
+                'requires_shipping'    => true,
+                'taxable'              => true,
+                'fulfillment_service'  => 'manual',
+                'grams'                => $product['weight_grams'] ?? 0,
             ];
 
-            // Create product
+            if ($compareAtPrice) {
+                $variant['compare_at_price'] = $compareAtPrice;
+            }
+
+            // ============================================================
+            // BUILD PRODUCT PAYLOAD
+            // ============================================================
+            $shopifyProduct = [
+                'product' => [
+                    'title'        => $updatedTitle,
+                    'body_html'    => '<p>' . ($product['description'] ?? '') . '</p>',
+                    'vendor'       => $product['vendor'] ?? 'Oriental Rug Mart',
+                    'product_type' => !empty($product['constructionType']) ? ucfirst($product['constructionType']) : '',
+                    'tags'         => implode(',', array_unique(array_filter($tags))),
+                    'status'       => $status,
+                    'options'      => [
+                        ['name' => 'Size',         'values' => [$size ?: 'Default']],
+                        ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']],
+                    ],
+                    'variants' => [$variant],
+                    'images'   => array_map(fn($img, $i) => [
+                        'src'      => str_replace(' ', '%20', $img),
+                        'position' => $i + 1,
+                    ], $product['images'], array_keys($product['images'])),
+                ],
+            ];
+
+            // ============================================================
+            // STEP 1: CREATE PRODUCT
+            // ============================================================
             $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
-                    'Content-Type' => 'application/json',
+                    'Content-Type'           => 'application/json',
                 ])->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
 
             if (!$response->successful()) {
-                $this->log("   ❌ Failed to create product - Status: " . $response->status());
-                $this->log("   Response: " . $response->body());
+                $this->log("❌ [{$sku}] Failed to create product (HTTP {$response->status()}): " . $response->body());
                 return false;
             }
 
-            $productData = $response->json();
-            $productId = $productData['product']['id'] ?? null;
+            $productData = $response->json('product');
+            $productId   = $productData['id'] ?? null;
 
             if (!$productId) {
-                $this->log("   ❌ Product created but no ID returned");
+                $this->log("❌ [{$sku}] Product created but no ID returned");
                 return false;
             }
 
-            // Add metafields
-            $metafields = $this->buildMetafields($product);
-            foreach ($metafields as $metafield) {
-                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-                    ->withHeaders([
-                        'X-Shopify-Access-Token' => $settings->shopify_token,
-                        'Content-Type' => 'application/json',
-                    ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
-                        'metafield' => $metafield
-                    ]);
+            $this->log("   ✓ [{$sku}] Product created — Shopify ID: {$productId}");
+            usleep(500000);
 
-                usleep(200000); // Rate limit
+            // ============================================================
+            // STEP 2: SET INVENTORY via inventory_levels/set
+            // Must be done AFTER product creation (inventory_item_id only exists after creation).
+            // ============================================================
+            if ($manageStock && $newQty > 0) {
+                try {
+                    // Get the created variant's inventory_item_id
+                    $createdVariant  = $productData['variants'][0] ?? null;
+                    $inventoryItemId = $createdVariant['inventory_item_id'] ?? null;
+
+                    if ($inventoryItemId) {
+                        // Get location
+                        $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+
+                        if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                            $locationId = $locResponse->json('locations')[0]['id'];
+
+                            usleep(300000);
+
+                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                                ->withHeaders([
+                                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    'Content-Type'           => 'application/json',
+                                ])->post("https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json", [
+                                    'location_id'       => $locationId,
+                                    'inventory_item_id' => $inventoryItemId,
+                                    'available'         => $newQty,
+                                ]);
+
+                            if ($invResponse->successful()) {
+                                $this->log("   ✓ [{$sku}] Inventory set to {$newQty}");
+                            } else {
+                                $this->log("   ⚠️ [{$sku}] Inventory set failed: " . $invResponse->body());
+                            }
+                        } else {
+                            $this->log("   ⚠️ [{$sku}] No locations found — inventory skipped");
+                        }
+                    } else {
+                        $this->log("   ⚠️ [{$sku}] No inventory_item_id on created variant");
+                    }
+                } catch (\Exception $e) {
+                    $this->log("   ⚠️ [{$sku}] Inventory exception: " . $e->getMessage());
+                }
+
+                usleep(400000);
+            } else {
+                $this->log("   ℹ️ [{$sku}] Inventory skipped (manageStock=" . ($manageStock ? 'true' : 'false') . ", qty={$newQty})");
             }
 
-            $this->log("✅ Product created successfully - ID: {$productId}");
+            // ============================================================
+            // STEP 3: ADD ALL METAFIELDS
+            // Metafields cannot be reliably included in the product creation payload,
+            // so we POST each one separately after creation — same as importProducts.
+            // ============================================================
+            $metafields = [];
+
+            // Product dimensions
+            foreach (['length', 'width', 'height'] as $dim) {
+                if (isset($product['dimension'][$dim]) && $product['dimension'][$dim] !== '') {
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key'       => $dim,
+                        'type'      => 'dimension',
+                        'value'     => json_encode(['value' => (float)$product['dimension'][$dim], 'unit' => 'INCHES']),
+                    ];
+                }
+            }
+
+            // Shipping / package dimensions
+            foreach (['height' => 'packageheight', 'length' => 'packagelength', 'width' => 'packagewidth'] as $field => $key) {
+                if (isset($product['shipping'][$field]) && $product['shipping'][$field] !== '') {
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key'       => $key,
+                        'type'      => 'dimension',
+                        'value'     => json_encode(['value' => (float)$product['shipping'][$field], 'unit' => 'INCHES']),
+                    ];
+                }
+            }
+
+            // All text metafields (same map as updateShopifyProduct)
+            $textMetaMap = [
+                'sizeCategoryTags'    => 'size_category_tags',
+                'costType'            => 'cost_type',
+                'cost'                => 'cost',
+                'condition'           => 'condition',
+                'productType'         => 'product_type',
+                'rugType'             => 'rug_type',
+                'constructionType'    => 'construction_type',
+                'country'             => 'country',
+                'production'          => 'production',
+                'primaryMaterial'     => 'primary_material',
+                'design'              => 'design',
+                'palette'             => 'palette',
+                'pattern'             => 'pattern',
+                'pile'                => 'pile',
+                'period'              => 'period',
+                'styleTags'           => 'style_tags',
+                'otherTags'           => 'other_tags',
+                'colourTags'          => 'color_tags',
+                'foundation'          => 'foundation',
+                'age'                 => 'age',
+                'quality'             => 'quality',
+                'conditionNotes'      => 'condition_notes',
+                'region'              => 'region',
+                'density'             => 'density',
+                'knots'               => 'knots',
+                'rugID'               => 'rug_id',
+                'size'                => 'size',
+                //'isTaxable'           => 'is_taxable',
+                'subCategory'         => 'subcategory',
+                'created_at'          => 'created_at',
+                'updated_at'          => 'updated_at',
+                //'consignmentisActive' => 'consignment_active',
+                'consignorRef'        => 'consignor_ref',
+                'parentId'            => 'parent_id',
+                'agreedLowPrice'      => 'agreed_low_price',
+                'agreedHighPrice'     => 'agreed_high_price',
+                'payoutPercentage'    => 'payout_percentage',
+            ];
+
+            foreach ($textMetaMap as $field => $key) {
+                if (array_key_exists($field, $product) && $product[$field] !== null && $product[$field] !== '') {
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key'       => $key,
+                        'type'      => 'single_line_text_field',
+                        'value'     => (string)$product[$field],
+                    ];
+                }
+            }
+
+            // Boolean metafields — must use type='boolean' with value 'true'/'false' (not 1/0/"").
+            // Shopify returns 422 "can't be blank" if you send these as single_line_text_field.
+            // Only add if the field exists and is not null (skip missing fields entirely).
+            $booleanMetaMap = [
+                'consignmentisActive' => 'consignment_active',
+                'isTaxable'           => 'is_taxable',
+            ];
+
+            foreach ($booleanMetaMap as $field => $key) {
+                if (array_key_exists($field, $product) && $product[$field] !== null) {
+                    // Normalise to 'true' or 'false' string — Shopify boolean metafields require this
+                    $boolVal = filter_var($product[$field], FILTER_VALIDATE_BOOLEAN) ? 'true' : 'false';
+                    $metafields[] = [
+                        'namespace' => 'custom',
+                        'key'       => $key,
+                        'type'      => 'boolean',
+                        'value'     => $boolVal,
+                    ];
+                }
+            }
+
+            // Rental price metafield
+            $rentalPrice = '';
+            $rpData = $product['rental_price_value'] ?? null;
+            if (!empty($rpData)) {
+                if (isset($rpData['key']) && $rpData['key'] === 'general_price') {
+                    $rentalPrice = $rpData['value'];
+                } elseif (!empty($rpData['redq_day_ranges_cost'])) {
+                    foreach ($rpData['redq_day_ranges_cost'] as $range) {
+                        if (!empty($range['range_cost'])) {
+                            $rentalPrice = $range['range_cost'];
+                        }
+                    }
+                }
+            }
+            if (!empty($rentalPrice)) {
+                $metafields[] = [
+                    'namespace' => 'custom',
+                    'key'       => 'rental_price',
+                    'type'      => 'single_line_text_field',
+                    'value'     => (string)$rentalPrice,
+                ];
+            }
+
+            // Source flag — marks this product as imported by the app
+            $metafields[] = [
+                'namespace' => 'custom',
+                'key'       => 'source',
+                'type'      => 'boolean',
+                'value'     => 'true',
+            ];
+
+            // POST each metafield individually (most reliable approach)
+            $metaCount = 0;
+            foreach ($metafields as $metafield) {
+                try {
+                    $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        ->withHeaders([
+                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                            'Content-Type'           => 'application/json',
+                        ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                            'metafield' => $metafield,
+                        ]);
+
+                    if ($metaResponse->successful()) {
+                        $metaCount++;
+                    } else {
+                        $this->log("   ⚠️ [{$sku}] Metafield '{$metafield['key']}' failed: " . $metaResponse->body());
+                    }
+                } catch (\Exception $e) {
+                    $this->log("   ⚠️ [{$sku}] Metafield '{$metafield['key']}' exception: " . $e->getMessage());
+                }
+
+                usleep(150000); // Rate limit between metafield POSTs
+            }
+
+            $this->log("   ✓ [{$sku}] {$metaCount}/" . count($metafields) . " metafields added");
+
+            // ============================================================
+            // DONE
+            // ============================================================
+            $this->log("✅ [{$sku}] Product inserted successfully — Shopify ID: {$productId}, Status: {$status}, Qty: {$newQty}");
             return true;
         } catch (\Exception $e) {
-            $this->log("   ❌ Exception: " . $e->getMessage());
-            //$this->log("   Trace: " . $e->getTraceAsString());
+            $this->log("❌ [{$sku}] insertNewProduct exception: " . $e->getMessage());
             return false;
         }
     }
+    // private function insertNewProduct($product, $shopUrl)
+    // {
+    //     try {
+    //         $settings = Setting::where('shopify_store_url', $shopUrl)->first();
+    //         if (!$settings) {
+    //             $this->log("❌ Settings not found for shop");
+    //             return false;
+    //         }
+
+    //         $settingsController = new SettingsController();
+    //         $sku = $product['ID'] ?? null;
+
+    //         // Validation
+    //         if (!$sku) {
+    //             $this->log("❌ Missing SKU");
+    //             return false;
+    //         }
+
+    //         if (empty($product['title'])) {
+    //             $this->log("❌ Missing title");
+    //             return false;
+    //         }
+
+    //         if (empty($product['regularPrice'])) {
+    //             $this->log("❌ Missing regular price");
+    //             return false;
+    //         }
+
+    //         if (empty($product['images'])) {
+    //             $this->log("❌ Missing images");
+    //             return false;
+    //         }
+
+    //         $shopifyDomain = rtrim($settings->shopify_store_url, '/');
+
+    //         // Check if already exists by SKU
+    //         $existingSkuProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
+    //         if ($existingSkuProduct) {
+    //             $this->log("⏭️ Already exists by SKU");
+    //             return false;
+    //         }
+
+    //         // Check if already exists by title
+    //         // $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
+    //         // if ($existingTitleProduct) {
+    //         //     $this->log("⏭️ Already exists by title");
+    //         //     return false;
+    //         // }
+
+    //         // Build tags
+    //         $tags = $this->buildProductTags($product);
+
+    //         // Get prices
+    //         $regularPrice = $product['regularPrice'] ?? '0.00';
+    //         $sellingPrice = $product['sellingPrice'] ?? null;
+    //         $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
+
+    //         // Get size data
+    //         $size = $product['size'] ?? '';
+    //         $shapeTags = [];
+    //         if (!empty($product['shapeCategoryTags'])) {
+    //             $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
+    //             $shapeTags = array_map('ucfirst', $shapeTags);
+    //         }
+
+    //         $nominalSize = $settingsController->convertSizeToNominal($size);
+    //         if (!empty($shapeTags)) {
+    //             $nominalSize .= ' ' . implode(' ', $shapeTags);
+    //         }
+
+    //         // Get colors
+    //         $colors = [];
+    //         if (!empty($product['colourTags'])) {
+    //             $colors = array_map('trim', explode(',', $product['colourTags']));
+    //         }
+
+    //         // Build variants
+    //         $variants = $this->buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice);
+
+    //         // Build title
+    //         $updatedTitle = $product['title'] . ' #' . $sku;
+    //         if (!empty($size)) {
+    //             $updatedTitle = $size . ' ' . $updatedTitle;
+    //         }
+
+    //         // Build product payload
+    //         $shopifyProduct = [
+    //             "product" => [
+    //                 'title' => $updatedTitle,
+    //                 'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
+    //                 'vendor' => $product['vendor'] ?? 'Oriental Rug Mart',
+    //                 'product_type' => isset($product['constructionType']) ? ucfirst($product['constructionType']) : '',
+    //                 "options" => [
+    //                     ["name" => "Size", "values" => [$size]],
+    //                     ["name" => "Nominal Size", "values" => [$nominalSize]],
+    //                 ],
+    //                 'images' => array_map(fn($imgUrl, $i) => [
+    //                     'src' => str_replace(' ', '%20', $imgUrl),
+    //                     'position' => $i + 1
+    //                 ], $product['images'], array_keys($product['images'])),
+    //                 'tags' => implode(', ', array_unique($tags)),
+    //                 "variants" => $variants,
+    //                 'status' => ($product['status'] ?? '') === 'available' ? 'active' : 'draft', // Set status based on Rug API
+    //             ]
+    //         ];
+
+    //         // Create product
+    //         $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+    //             ->withHeaders([
+    //                 'X-Shopify-Access-Token' => $settings->shopify_token,
+    //                 'Content-Type' => 'application/json',
+    //             ])->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
+
+    //         if (!$response->successful()) {
+    //             $this->log("   ❌ Failed to create product - Status: " . $response->status());
+    //             $this->log("   Response: " . $response->body());
+    //             return false;
+    //         }
+
+    //         $productData = $response->json();
+    //         $productId = $productData['product']['id'] ?? null;
+
+    //         if (!$productId) {
+    //             $this->log("   ❌ Product created but no ID returned");
+    //             return false;
+    //         }
+
+    //         // Add metafields
+    //         $metafields = $this->buildMetafields($product);
+    //         foreach ($metafields as $metafield) {
+    //             Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+    //                 ->withHeaders([
+    //                     'X-Shopify-Access-Token' => $settings->shopify_token,
+    //                     'Content-Type' => 'application/json',
+    //                 ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+    //                     'metafield' => $metafield
+    //                 ]);
+
+    //             usleep(200000); // Rate limit
+    //         }
+
+    //         $this->log("✅ Product created successfully - ID: {$productId}");
+    //         return true;
+    //     } catch (\Exception $e) {
+    //         $this->log("   ❌ Exception: " . $e->getMessage());
+    //         //$this->log("   Trace: " . $e->getTraceAsString());
+    //         return false;
+    //     }
+    // }
 
     /**
      * Build product tags from Rug API data

@@ -17,6 +17,7 @@ class DailyImportCommand extends Command
 
     private $logFilePath;
     private $cronTrackingKey = 'daily_import_last_successful_run';
+    private $cachedLocationId = null;
 
     public function handle()
     {
@@ -37,6 +38,10 @@ class DailyImportCommand extends Command
             foreach ($shops as $shop) {
                 $this->initLog($shop->shopify_store_url);
 
+                // if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
+                //     $this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
+                //     continue;
+                // }
 
                 if (!$shop->shopify_store_url || !$shop->api_key || !$shop->shopify_token) {
                     $this->log("⚠️ Skipping shop (missing credentials): {$shop->shopify_store_url}");
@@ -135,6 +140,23 @@ class DailyImportCommand extends Command
         $batchSize = 50;
         $batches = array_chunk($recentlyUpdatedProducts, $batchSize);
         $this->log("📋 Total SKUs to process: {$stats['recently_updated']} (in " . count($batches) . " batches)");
+
+        // Pre-fetch location ID once for this shop
+        try {
+            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                ->withHeaders(['X-Shopify-Access-Token' => $shop->shopify_token])
+                ->get("https://{$shop->shopify_store_url}/admin/api/2025-07/locations.json");
+
+            if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                $this->cachedLocationId = $locResponse->json('locations')[0]['id'];
+                $this->log("✓ Location pre-fetched: {$this->cachedLocationId}");
+            } else {
+                $this->log("⚠️ No locations found during pre-fetch");
+            }
+        } catch (\Exception $e) {
+            $this->log("⚠️ Location pre-fetch failed: " . $e->getMessage());
+        }
+        usleep(550000);
 
         foreach ($batches as $batchNumber => $batch) {
             $this->log("🔄 Processing batch " . ($batchNumber + 1) . "/" . count($batches) . " (" . count($batch) . " products)");
@@ -583,14 +605,27 @@ class DailyImportCommand extends Command
 
                     if ($inventoryItemId) {
                         // Get location
-                        $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                            ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+                        // Get location (use cached if available)
+                        $locationId = $this->cachedLocationId;
+                        if (!$locationId) {
+                            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                                ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-                        if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
-                            $locationId = $locResponse->json('locations')[0]['id'];
+                            if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                                $locationId = $locResponse->json('locations')[0]['id'];
+                            }
+                        }
 
-                            usleep(300000);
+                        // $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        //     ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                        //     ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+
+                        //if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
+                        //$locationId = $locResponse->json('locations')[0]['id'];
+
+                        if ($locationId) {
+                            usleep(550000);
 
                             $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
                                 ->withHeaders([
@@ -607,9 +642,10 @@ class DailyImportCommand extends Command
                             } else {
                                 $this->log("   ⚠️ [{$sku}] Inventory set failed: " . $invResponse->body());
                             }
-                        } else {
-                            $this->log("   ⚠️ [{$sku}] No locations found — inventory skipped");
                         }
+                        //} else {
+                        //$this->log("   ⚠️ [{$sku}] No locations found — inventory skipped");
+                        //}
                     } else {
                         $this->log("   ⚠️ [{$sku}] No inventory_item_id on created variant");
                     }
@@ -757,6 +793,13 @@ class DailyImportCommand extends Command
                 'value'     => 'true',
             ];
 
+            $metafields[] = [
+                'namespace' => 'custom',
+                'key'       => 'cron_inserted',
+                'type'      => 'single_line_text_field',
+                'value'     => 'yes',
+            ];
+
             // POST each metafield individually (most reliable approach)
             $metaCount = 0;
             foreach ($metafields as $metafield) {
@@ -793,155 +836,6 @@ class DailyImportCommand extends Command
             return false;
         }
     }
-    // private function insertNewProduct($product, $shopUrl)
-    // {
-    //     try {
-    //         $settings = Setting::where('shopify_store_url', $shopUrl)->first();
-    //         if (!$settings) {
-    //             $this->log("❌ Settings not found for shop");
-    //             return false;
-    //         }
-
-    //         $settingsController = new SettingsController();
-    //         $sku = $product['ID'] ?? null;
-
-    //         // Validation
-    //         if (!$sku) {
-    //             $this->log("❌ Missing SKU");
-    //             return false;
-    //         }
-
-    //         if (empty($product['title'])) {
-    //             $this->log("❌ Missing title");
-    //             return false;
-    //         }
-
-    //         if (empty($product['regularPrice'])) {
-    //             $this->log("❌ Missing regular price");
-    //             return false;
-    //         }
-
-    //         if (empty($product['images'])) {
-    //             $this->log("❌ Missing images");
-    //             return false;
-    //         }
-
-    //         $shopifyDomain = rtrim($settings->shopify_store_url, '/');
-
-    //         // Check if already exists by SKU
-    //         $existingSkuProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
-    //         if ($existingSkuProduct) {
-    //             $this->log("⏭️ Already exists by SKU");
-    //             return false;
-    //         }
-
-    //         // Check if already exists by title
-    //         // $existingTitleProduct = $settingsController->checkProductBySkuOrTitle($settings, $shopifyDomain, $product['title'], 'title');
-    //         // if ($existingTitleProduct) {
-    //         //     $this->log("⏭️ Already exists by title");
-    //         //     return false;
-    //         // }
-
-    //         // Build tags
-    //         $tags = $this->buildProductTags($product);
-
-    //         // Get prices
-    //         $regularPrice = $product['regularPrice'] ?? '0.00';
-    //         $sellingPrice = $product['sellingPrice'] ?? null;
-    //         $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
-
-    //         // Get size data
-    //         $size = $product['size'] ?? '';
-    //         $shapeTags = [];
-    //         if (!empty($product['shapeCategoryTags'])) {
-    //             $shapeTags = array_map('trim', explode(',', $product['shapeCategoryTags']));
-    //             $shapeTags = array_map('ucfirst', $shapeTags);
-    //         }
-
-    //         $nominalSize = $settingsController->convertSizeToNominal($size);
-    //         if (!empty($shapeTags)) {
-    //             $nominalSize .= ' ' . implode(' ', $shapeTags);
-    //         }
-
-    //         // Get colors
-    //         $colors = [];
-    //         if (!empty($product['colourTags'])) {
-    //             $colors = array_map('trim', explode(',', $product['colourTags']));
-    //         }
-
-    //         // Build variants
-    //         $variants = $this->buildVariants($product, $size, $nominalSize, $colors, $currentPrice, $regularPrice, $sellingPrice);
-
-    //         // Build title
-    //         $updatedTitle = $product['title'] . ' #' . $sku;
-    //         if (!empty($size)) {
-    //             $updatedTitle = $size . ' ' . $updatedTitle;
-    //         }
-
-    //         // Build product payload
-    //         $shopifyProduct = [
-    //             "product" => [
-    //                 'title' => $updatedTitle,
-    //                 'body_html' => '<p>' . ($product['description'] ?? '') . '</p>',
-    //                 'vendor' => $product['vendor'] ?? 'Oriental Rug Mart',
-    //                 'product_type' => isset($product['constructionType']) ? ucfirst($product['constructionType']) : '',
-    //                 "options" => [
-    //                     ["name" => "Size", "values" => [$size]],
-    //                     ["name" => "Nominal Size", "values" => [$nominalSize]],
-    //                 ],
-    //                 'images' => array_map(fn($imgUrl, $i) => [
-    //                     'src' => str_replace(' ', '%20', $imgUrl),
-    //                     'position' => $i + 1
-    //                 ], $product['images'], array_keys($product['images'])),
-    //                 'tags' => implode(', ', array_unique($tags)),
-    //                 "variants" => $variants,
-    //                 'status' => ($product['status'] ?? '') === 'available' ? 'active' : 'draft', // Set status based on Rug API
-    //             ]
-    //         ];
-
-    //         // Create product
-    //         $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-    //             ->withHeaders([
-    //                 'X-Shopify-Access-Token' => $settings->shopify_token,
-    //                 'Content-Type' => 'application/json',
-    //             ])->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
-
-    //         if (!$response->successful()) {
-    //             $this->log("   ❌ Failed to create product - Status: " . $response->status());
-    //             $this->log("   Response: " . $response->body());
-    //             return false;
-    //         }
-
-    //         $productData = $response->json();
-    //         $productId = $productData['product']['id'] ?? null;
-
-    //         if (!$productId) {
-    //             $this->log("   ❌ Product created but no ID returned");
-    //             return false;
-    //         }
-
-    //         // Add metafields
-    //         $metafields = $this->buildMetafields($product);
-    //         foreach ($metafields as $metafield) {
-    //             Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-    //                 ->withHeaders([
-    //                     'X-Shopify-Access-Token' => $settings->shopify_token,
-    //                     'Content-Type' => 'application/json',
-    //                 ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
-    //                     'metafield' => $metafield
-    //                 ]);
-
-    //             usleep(200000); // Rate limit
-    //         }
-
-    //         $this->log("✅ Product created successfully - ID: {$productId}");
-    //         return true;
-    //     } catch (\Exception $e) {
-    //         $this->log("   ❌ Exception: " . $e->getMessage());
-    //         //$this->log("   Trace: " . $e->getTraceAsString());
-    //         return false;
-    //     }
-    // }
 
     /**
      * Build product tags from Rug API data
@@ -1356,35 +1250,52 @@ class DailyImportCommand extends Command
                 $inventoryItemId = $currentVariant['inventory_item_id'] ?? null;
 
                 if ($inventoryItemId && ($currentVariant['inventory_management'] ?? null) === 'shopify') {
-                    $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                        ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-                    if ($locationsResponse->successful()) {
-                        $locations = $locationsResponse->json('locations');
-                        if (!empty($locations)) {
-                            $locationId = $locations[0]['id'];
+                    $locationId = $this->cachedLocationId;
+                    if (!$locationId) {
+                        $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-                                ->withHeaders([
-                                    'X-Shopify-Access-Token' => $settings->shopify_token,
-                                    'Content-Type' => 'application/json',
-                                ])->post("https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json", [
-                                    'location_id' => $locationId,
-                                    'inventory_item_id' => $inventoryItemId,
-                                    'available' => $newQuantity
-                                ]);
-
-                            if ($invResponse->successful()) {
-                                $updatedFields[] = 'inventory';
-                                $this->log("      ✓ Inventory updated to {$newQuantity} units");
-                            } else {
-                                $this->log("      ⚠️ Inventory update failed");
+                        if ($locationsResponse->successful()) {
+                            $locations = $locationsResponse->json('locations');
+                            if (!empty($locations)) {
+                                $locationId = $locations[0]['id'];
                             }
-
-                            usleep(500000);
                         }
                     }
+
+                    // $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    //         ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                    //         ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
+
+
+                    //if ($locationsResponse->successful()) {
+                    //$locations = $locationsResponse->json('locations');
+                    //if (!empty($locations)) {
+                    //$locationId = $locations[0]['id'];
+                    if ($locationId) {
+                        usleep(550000);
+                        $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            ->withHeaders([
+                                'X-Shopify-Access-Token' => $settings->shopify_token,
+                                'Content-Type' => 'application/json',
+                            ])->post("https://{$shopifyDomain}/admin/api/2025-07/inventory_levels/set.json", [
+                                'location_id' => $locationId,
+                                'inventory_item_id' => $inventoryItemId,
+                                'available' => $newQuantity
+                            ]);
+
+                        if ($invResponse->successful()) {
+                            $updatedFields[] = 'inventory';
+                            $this->log("      ✓ Inventory updated to {$newQuantity} units");
+                        } else {
+                            $this->log("      ⚠️ Inventory update failed");
+                        }
+                    }
+
+                    //}
+                    // }
                 }
             }
 
@@ -1455,20 +1366,42 @@ class DailyImportCommand extends Command
             // Other metafields
             $metaFieldMap = [
                 'sizeCategoryTags' => 'size_category_tags',
+                'costType' => 'cost_type',
                 'cost' => 'cost',
                 'condition' => 'condition',
+                'productType' => 'product_type',
+                'rugType' => 'rug_type',
                 'constructionType' => 'construction_type',
                 'country' => 'country',
+                'production' => 'production',
                 'primaryMaterial' => 'primary_material',
                 'design' => 'design',
                 'palette' => 'palette',
                 'pattern' => 'pattern',
+                'pile' => 'pile',
+                'period' => 'period',
                 'styleTags' => 'style_tags',
+                'otherTags' => 'other_tags',
                 'colourTags' => 'color_tags',
+                'foundation' => 'foundation',
+                'age' => 'age',
+                'quality' => 'quality',
+                'conditionNotes' => 'condition_notes',
                 'region' => 'region',
-                'rugType' => 'rug_type',
+                'density' => 'density',
+                'knots' => 'knots',
+                'rugID' => 'rug_id',
                 'size' => 'size',
+                'isTaxable' => 'is_taxable',
+                'subCategory' => 'subcategory',
+                'created_at' => 'created_at',
                 'updated_at' => 'updated_at',
+                'consignmentisActive' => 'consignment_active',
+                'consignorRef' => 'consignor_ref',
+                'parentId' => 'parent_id',
+                'agreedLowPrice' => 'agreed_low_price',
+                'agreedHighPrice' => 'agreed_high_price',
+                'payoutPercentage' => 'payout_percentage',
             ];
 
             foreach ($metaFieldMap as $field => $key) {
@@ -1477,7 +1410,7 @@ class DailyImportCommand extends Command
                     $metaKey = 'custom.' . $key;
                     $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
-                    if ($metaId) {
+                    if ($metaId && !empty($value)) {
                         $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
                             ->withHeaders([
                                 'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -1494,6 +1427,66 @@ class DailyImportCommand extends Command
                     }
                 }
             }
+
+
+            // ✅ Static field 1: custom.source → always true (boolean)
+            if (empty($existingMetafields['custom.source']['id'])) {
+                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json',
+                    ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                        'metafield' => [
+                            'namespace' => 'custom',
+                            'key'       => 'source',
+                            'type'      => 'boolean',
+                            'value'     => 'true',
+                        ]
+                    ]);
+            } else {
+                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json',
+                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$existingMetafields['custom.source']['id']}.json", [
+                        'metafield' => [
+                            'value' => 'true',
+                            'type'  => 'boolean',
+                        ]
+                    ]);
+            }
+
+            usleep(550000);
+
+            // ✅ Static field 2: custom.cron_updated → always "yes" (single_line_text_field)
+            if (empty($existingMetafields['custom.cron_updated']['id'])) {
+                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json',
+                    ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                        'metafield' => [
+                            'namespace' => 'custom',
+                            'key'       => 'cron_updated',
+                            'type'      => 'single_line_text_field',
+                            'value'     => 'yes',
+                        ]
+                    ]);
+            } else {
+                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    ->withHeaders([
+                        'X-Shopify-Access-Token' => $settings->shopify_token,
+                        'Content-Type'           => 'application/json',
+                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/metafields/{$existingMetafields['custom.cron_updated']['id']}.json", [
+                        'metafield' => [
+                            'value' => 'yes',
+                            'type'  => 'single_line_text_field',
+                        ]
+                    ]);
+            }
+
+            usleep(550000);
+
 
             if ($metaUpdates > 0) {
                 $updatedFields[] = "{$metaUpdates}_metafields";
@@ -1601,7 +1594,9 @@ class DailyImportCommand extends Command
             $pageInfo = null;
 
             do {
-                $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
+                $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
+                //$url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
+
                 if ($pageInfo) $url .= "&page_info={$pageInfo}";
 
                 $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
@@ -1653,6 +1648,7 @@ class DailyImportCommand extends Command
 
     private function getDaysToLookBack($shop)
     {
+        //return 1;
         if ($this->option('force-days')) {
             return (int) $this->option('force-days');
         }

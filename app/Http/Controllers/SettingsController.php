@@ -688,9 +688,27 @@ class SettingsController extends Controller
                 return false;
             }
 
-            $matchedVariant = $searchResponse->json('variants')[0];
-            $variantId      = $matchedVariant['id'];
-            $productId      = $matchedVariant['product_id'];
+            // ✅ Find EXACT SKU match instead of blindly taking [0]
+            $matchedVariant = null;
+            foreach ($searchResponse->json('variants') as $variant) {
+                if ((string)$variant['sku'] === (string)$sku) {
+                    $matchedVariant = $variant;
+                    break;
+                }
+            }
+
+            // ✅ If no exact match found, treat as not existing
+            if (!$matchedVariant) {
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ❌ No EXACT SKU match found for: {$sku}", 'success' => false]);
+                return false;
+            }
+
+            $variantId = $matchedVariant['id'];
+            $productId = $matchedVariant['product_id'];
+            //$sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ✅ Exact match found — ProductId: {$productId}, VariantId: {$variantId}"]);
+
+            //return false;
+            //}
 
             $shopifyRateLimit();
 
@@ -1585,13 +1603,27 @@ class SettingsController extends Controller
                     $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
 
                     if ($existingSkuProduct) {
-                        $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress, $shopifyRateLimit, $cachedLocationId);
-                        if ($updateResult) {
-                            $updatedCount++;
-                        } else {
+
+                        // $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress, $shopifyRateLimit, $cachedLocationId);
+                        // if ($updateResult) {
+                        //     $updatedCount++;
+                        // } else {
+                        //     $failCount++;
+                        // }
+                        // continue;
+
+                        try {
+                            $updateResult = $this->updateShopifyProduct($product, $settings, $sendMessage, $progress, $shopifyRateLimit, $cachedLocationId);
+                            if ($updateResult) {
+                                $updatedCount++;
+                            } else {
+                                $failCount++;
+                            }
+                        } catch (\Exception $e) {
+                            // \Log::error('UPDATE THREW EXCEPTION - FALLING TO CREATE: ' . $e->getMessage());
                             $failCount++;
                         }
-                        continue;
+                        continue; // ✅ this MUST be outside try/catch
                     }
 
                     // Prepare tags array

@@ -679,32 +679,51 @@ class SettingsController extends Controller
             // ============================================================
             // STEP 1: FIND VARIANT BY SKU
             // ============================================================
+            $query = <<<GQL
+                        {
+                        productVariants(first: 5, query: "sku:'{$sku}'") {
+                            edges {
+                            node {
+                                id
+                                sku
+                                legacyResourceId
+                                product {
+                                id
+                                legacyResourceId
+                                }
+                            }
+                            }
+                        }
+                        }
+                        GQL;
+
             $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
-                ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                ->get("https://{$shopifyDomain}/admin/api/2025-07/variants.json", ['sku' => $sku]);
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])
+                ->post("https://{$shopifyDomain}/admin/api/2025-07/graphql.json", [
+                    'query' => $query
+                ]);
 
-            if (!$searchResponse->successful() || empty($searchResponse->json('variants'))) {
-                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ❌ No product found for SKU: {$sku}", 'success' => false]);
+            $variants = $searchResponse->json('data.productVariants.edges');
+
+            // Filter exact matches only
+            $exactMatches = array_filter($variants, fn($edge) => (string)$edge['node']['sku'] === (string)$sku);
+
+            if (empty($exactMatches)) {
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ❌ No EXACT SKU match for: {$sku}", 'success' => false]);
                 return false;
             }
 
-            // ✅ Find EXACT SKU match instead of blindly taking [0]
-            $matchedVariant = null;
-            foreach ($searchResponse->json('variants') as $variant) {
-                if ((string)$variant['sku'] === (string)$sku) {
-                    $matchedVariant = $variant;
-                    break;
-                }
+            if (count($exactMatches) > 1) {
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ⚠️ Multiple exact matches for SKU: {$sku} — using first", 'success' => false]);
             }
 
-            // ✅ If no exact match found, treat as not existing
-            if (!$matchedVariant) {
-                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ❌ No EXACT SKU match found for: {$sku}", 'success' => false]);
-                return false;
-            }
-
-            $variantId = $matchedVariant['id'];
-            $productId = $matchedVariant['product_id'];
+            // Safe to use — guaranteed exact match
+            $matchedVariant = array_values($exactMatches)[0]['node'];
+            $variantId = $matchedVariant['legacyResourceId'];
+            $productId = $matchedVariant['product']['legacyResourceId'];
             //$sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "   ✅ Exact match found — ProductId: {$productId}, VariantId: {$variantId}"]);
 
             //return false;

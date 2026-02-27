@@ -143,7 +143,7 @@ class DailyImportCommand extends Command
 
         // Pre-fetch location ID once for this shop
         try {
-            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders(['X-Shopify-Access-Token' => $shop->shopify_token])
                 ->get("https://{$shop->shopify_store_url}/admin/api/2025-07/locations.json");
 
@@ -200,7 +200,7 @@ class DailyImportCommand extends Command
                     // Fetch metafields
                     $metafields = $this->getShopifyProductMetafields($shop, $shopifyProduct['id']);
                     $shopifyProduct['metafields'] = $metafields;
-
+                    usleep(550000);
                     // Find matching variant
                     $variant = null;
                     foreach ($shopifyProduct['variants'] as $v) {
@@ -290,7 +290,7 @@ class DailyImportCommand extends Command
                     $stats['errors']++;
                 }
 
-                usleep(500000); // Rate limiting
+                usleep(550000); // Rate limiting
             }
         }
 
@@ -315,7 +315,7 @@ class DailyImportCommand extends Command
     private function publishProduct($shop, $productId)
     {
         try {
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $shop->shopify_token,
                     'Content-Type' => 'application/json',
@@ -344,7 +344,7 @@ class DailyImportCommand extends Command
     private function unpublishProduct($shop, $productId)
     {
         try {
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $shop->shopify_token,
                     'Content-Type' => 'application/json',
@@ -428,7 +428,7 @@ class DailyImportCommand extends Command
             // ============================================================
             // CHECK IF ALREADY EXISTS BY SKU
             // ============================================================
-            // $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            // $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
             //     ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
             //     ->get("https://{$shopifyDomain}/admin/api/2025-07/variants.json", ['sku' => $sku]);
 
@@ -571,7 +571,7 @@ class DailyImportCommand extends Command
             // ============================================================
             // STEP 1: CREATE PRODUCT
             // ============================================================
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type'           => 'application/json',
@@ -591,7 +591,7 @@ class DailyImportCommand extends Command
             }
 
             $this->log("   ✓ [{$sku}] Product created — Shopify ID: {$productId}");
-            usleep(500000);
+            usleep(550000);
 
             // ============================================================
             // STEP 2: SET INVENTORY via inventory_levels/set
@@ -608,7 +608,7 @@ class DailyImportCommand extends Command
                         // Get location (use cached if available)
                         $locationId = $this->cachedLocationId;
                         if (!$locationId) {
-                            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                                 ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                                 ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
@@ -617,7 +617,7 @@ class DailyImportCommand extends Command
                             }
                         }
 
-                        // $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        // $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                         //     ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                         //     ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
@@ -627,7 +627,7 @@ class DailyImportCommand extends Command
                         if ($locationId) {
                             usleep(550000);
 
-                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                                 ->withHeaders([
                                     'X-Shopify-Access-Token' => $settings->shopify_token,
                                     'Content-Type'           => 'application/json',
@@ -804,7 +804,7 @@ class DailyImportCommand extends Command
             $metaCount = 0;
             foreach ($metafields as $metafield) {
                 try {
-                    $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                         ->withHeaders([
                             'X-Shopify-Access-Token' => $settings->shopify_token,
                             'Content-Type'           => 'application/json',
@@ -821,7 +821,8 @@ class DailyImportCommand extends Command
                     $this->log("   ⚠️ [{$sku}] Metafield '{$metafield['key']}' exception: " . $e->getMessage());
                 }
 
-                usleep(150000); // Rate limit between metafield POSTs
+                //usleep(150000); // Rate limit between metafield POSTs
+                usleep(550000);
             }
 
             $this->log("   ✓ [{$sku}] {$metaCount}/" . count($metafields) . " metafields added");
@@ -1098,7 +1099,7 @@ class DailyImportCommand extends Command
             }
 
             // Update product (without images and options first)
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type' => 'application/json',
@@ -1114,7 +1115,7 @@ class DailyImportCommand extends Command
                 $this->log("      Response: " . $response->body());
             }
 
-            usleep(500000);
+            usleep(550000);
 
             // ===== STEP 2: ENSURE PRODUCT OPTIONS EXIST =====
             $this->log("      🔧 Ensuring product options...");
@@ -1146,7 +1147,7 @@ class DailyImportCommand extends Command
                 }
 
                 // Update product with options
-                $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type' => 'application/json',
@@ -1172,7 +1173,7 @@ class DailyImportCommand extends Command
                     $this->log("⚠️ Failed to add options - Status: " . $optionsResponse->status());
                 }
 
-                usleep(500000);
+                usleep(550000);
             }
 
             // ===== STEP 3: UPDATE VARIANT =====
@@ -1223,7 +1224,7 @@ class DailyImportCommand extends Command
                 $variantPayload['grams'] = $rug['weight_grams'];
             }
 
-            $variantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $variantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type' => 'application/json',
@@ -1240,7 +1241,7 @@ class DailyImportCommand extends Command
                 // Don't return false - continue with other updates
             }
 
-            usleep(500000);
+            usleep(550000);
 
             // ===== STEP 4: UPDATE INVENTORY =====
             if (isset($rug['inventory']['quantityLevel'][0]['available'])) {
@@ -1253,7 +1254,7 @@ class DailyImportCommand extends Command
 
                     $locationId = $this->cachedLocationId;
                     if (!$locationId) {
-                        $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                             ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                             ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
@@ -1265,7 +1266,7 @@ class DailyImportCommand extends Command
                         }
                     }
 
-                    // $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                    // $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     //         ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                     //         ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
@@ -1276,7 +1277,7 @@ class DailyImportCommand extends Command
                     //$locationId = $locations[0]['id'];
                     if ($locationId) {
                         usleep(550000);
-                        $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                             ->withHeaders([
                                 'X-Shopify-Access-Token' => $settings->shopify_token,
                                 'Content-Type' => 'application/json',
@@ -1307,7 +1308,7 @@ class DailyImportCommand extends Command
                     'src' => str_replace(' ', '%20', $img)  // <-- Encode spaces
                 ], $rug['images']);
 
-                $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type' => 'application/json',
@@ -1322,7 +1323,7 @@ class DailyImportCommand extends Command
                     $this->log("      ⚠️ Images update failed");
                 }
 
-                usleep(500000);
+                usleep(550000);
             }
 
             // ===== STEP 6: UPDATE METAFIELDS =====
@@ -1345,7 +1346,7 @@ class DailyImportCommand extends Command
                         $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
                         if ($metaId) {
-                            $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                            $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                                 ->withHeaders([
                                     'X-Shopify-Access-Token' => $settings->shopify_token,
                                     'Content-Type' => 'application/json',
@@ -1411,7 +1412,7 @@ class DailyImportCommand extends Command
                     $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
                     if ($metaId && !empty($value)) {
-                        $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                        $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                             ->withHeaders([
                                 'X-Shopify-Access-Token' => $settings->shopify_token,
                                 'Content-Type' => 'application/json',
@@ -1431,7 +1432,7 @@ class DailyImportCommand extends Command
 
             // ✅ Static field 1: custom.source → always true (boolean)
             if (empty($existingMetafields['custom.source']['id'])) {
-                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type'           => 'application/json',
@@ -1444,7 +1445,7 @@ class DailyImportCommand extends Command
                         ]
                     ]);
             } else {
-                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type'           => 'application/json',
@@ -1460,7 +1461,7 @@ class DailyImportCommand extends Command
 
             // ✅ Static field 2: custom.cron_updated → always "yes" (single_line_text_field)
             if (empty($existingMetafields['custom.cron_updated']['id'])) {
-                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type'           => 'application/json',
@@ -1473,7 +1474,7 @@ class DailyImportCommand extends Command
                         ]
                     ]);
             } else {
-                Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'X-Shopify-Access-Token' => $settings->shopify_token,
                         'Content-Type'           => 'application/json',
@@ -1590,51 +1591,116 @@ class DailyImportCommand extends Command
     private function getShopifyProductBySKU($shop, $sku)
     {
         try {
-            $limit = 250;
-            $pageInfo = null;
-
-            do {
-                $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
-                //$url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
-
-                if ($pageInfo) $url .= "&page_info={$pageInfo}";
-
-                $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
-                    ->withHeaders([
-                        'X-Shopify-Access-Token' => $shop->shopify_token,
-                        'Content-Type' => 'application/json',
-                    ])->get($url);
-
-                if (!$response->successful()) return null;
-
-                $products = $response->json('products', []);
-
-                foreach ($products as $product) {
-                    foreach ($product['variants'] ?? [] as $variant) {
-                        if (($variant['sku'] ?? '') === $sku) {
-                            return $product;
+            $query = <<<GQL
+                    {
+                    productVariants(first: 5, query: "sku:'{$sku}'") {
+                        edges {
+                        node {
+                            sku
+                            legacyResourceId
+                            product {
+                            legacyResourceId
+                            }
+                        }
                         }
                     }
-                }
+                    }
+                    GQL;
 
-                $linkHeader = $response->header('Link');
-                if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
-                    $pageInfo = $matches[1];
-                } else {
-                    $pageInfo = null;
-                }
-            } while ($pageInfo);
+            $searchResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $shop->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->post("https://{$shop->shopify_store_url}/admin/api/2025-07/graphql.json", [
+                    'query' => $query
+                ]);
 
-            return null;
+            if (!$searchResponse->successful()) {
+                return null;
+            }
+
+            $variants = $searchResponse->json('data.productVariants.edges') ?? [];
+
+            // Exact match filter
+            $exactMatches = array_filter($variants, fn($edge) => (string)$edge['node']['sku'] === (string)$sku);
+
+            if (empty($exactMatches)) {
+                return null;
+            }
+
+            $matchedVariant = array_values($exactMatches)[0]['node'];
+            $productId = $matchedVariant['product']['legacyResourceId'];
+
+            usleep(550000);
+
+            // Fetch full product using numeric REST ID
+            $productResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                ->withHeaders([
+                    'X-Shopify-Access-Token' => $shop->shopify_token,
+                    'Content-Type' => 'application/json',
+                ])->get("https://{$shop->shopify_store_url}/admin/api/2025-07/products/{$productId}.json");
+
+            if (!$productResponse->successful()) {
+                return null;
+            }
+
+            usleep(550000);
+
+            return $productResponse->json('product');
         } catch (\Exception $e) {
+            $this->log("   ⚠️ SKU lookup error: " . $e->getMessage());
             return null;
         }
     }
 
+    // private function getShopifyProductBySKU($shop, $sku)
+    // {
+    //     try {
+    //         $limit = 250;
+    //         $pageInfo = null;
+
+    //         do {
+    //             $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
+    //             //$url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
+
+    //             if ($pageInfo) $url .= "&page_info={$pageInfo}";
+
+    //             $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+    //                 ->withHeaders([
+    //                     'X-Shopify-Access-Token' => $shop->shopify_token,
+    //                     'Content-Type' => 'application/json',
+    //                 ])->get($url);
+
+    //             if (!$response->successful()) return null;
+
+    //             $products = $response->json('products', []);
+
+    //             foreach ($products as $product) {
+    //                 foreach ($product['variants'] ?? [] as $variant) {
+    //                     if (($variant['sku'] ?? '') === $sku) {
+    //                         return $product;
+    //                     }
+    //                 }
+    //             }
+
+    //             $linkHeader = $response->header('Link');
+    //             if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
+    //                 $pageInfo = $matches[1];
+    //             } else {
+    //                 $pageInfo = null;
+    //             }
+    //         } while ($pageInfo);
+
+    //         return null;
+    //     } catch (\Exception $e) {
+    //         return null;
+    //     }
+    // }
+
     private function getShopifyProductMetafields($shop, $productId)
     {
         try {
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $shop->shopify_token,
                     'Content-Type' => 'application/json',
@@ -1679,7 +1745,7 @@ class DailyImportCommand extends Command
 
         if (!$settings->token || !$tokenExpiry || $tokenExpiry->isPast()) {
             try {
-                $tokenResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 1000)
+                $tokenResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([
                         'Content-Type' => 'application/json',
                         'Accept' => 'application/json',

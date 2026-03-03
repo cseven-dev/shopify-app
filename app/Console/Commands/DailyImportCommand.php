@@ -97,7 +97,8 @@ class DailyImportCommand extends Command
             'inserted' => 0,
             'updated' => 0,
             'unpublished' => 0,
-            'errors' => 0
+            'errors' => 0,
+            'published' => 0
         ];
 
         // Get days to look back
@@ -265,20 +266,48 @@ class DailyImportCommand extends Command
                             $stats['updated']++;
 
                             // Handle publish/unpublish status
-                            $status = $rugProduct['status'] ?? '';
+                            //$status = $rugProduct['status'] ?? '';
+                            //$productCategory = $rugProduct['product_category'] ?? '';
                             $inventoryQty = $rugProduct['inventory']['quantityLevel'][0]['available'] ?? null;
 
                             // Check inventory first - if 0, always unpublish
-                            if ($inventoryQty !== null && $inventoryQty <= 0) {
-                                $this->unpublishProduct($shop, $shopifyProduct['id']);
-                                $stats['unpublished']++;
-                                $this->log("   📴 Product unpublished (inventory: 0)");
-                            }
-                            // If inventory > 0, then check status field
-                            else if ($status === 'available') {
-                                $this->publishProduct($shop, $shopifyProduct['id']);
+                            // if ($inventoryQty !== null && $inventoryQty <= 0) {
+                            //     $this->unpublishProduct($shop, $shopifyProduct['id']);
+                            //     $stats['unpublished']++;
+                            //     $this->log("   📴 Product unpublished (inventory: 0)");
+                            // }
+                            // // If inventory > 0, then check status field
+                            // else if ($status === 'available') {
+                            //     $this->publishProduct($shop, $shopifyProduct['id']);
+                            // } else {
+                            //     $this->unpublishProduct($shop, $shopifyProduct['id']);
+                            //     $stats['unpublished']++;
+                            // }
+
+                            // Product should be active only if it has a category AND inventory > 0
+                            //if (!empty($productCategory) && $inventoryQty !== null && $inventoryQty > 0) {
+                            //$this->publishProduct($shop, $shopifyProduct['id']);
+                            //     $stats['published']++; // You might want to track published stats
+                            //     $this->log("   ✅ Product published (category: {$productCategory}, inventory: {$inventoryQty})");
+                            // } else {
+                            //     $this->unpublishProduct($shop, $shopifyProduct['id']);
+                            //     $stats['unpublished']++;
+
+                            //     $reason = '';
+                            //     if (empty($productCategory)) {
+                            //         $reason = 'missing owned,consignment,rental value';
+                            //     } elseif ($inventoryQty !== null && $inventoryQty <= 0) {
+                            //         $reason = 'inventory: 0';
+                            //     } else {
+                            //         $reason = 'invalid state';
+                            //     }
+                            //     $this->log("   📴 Product unpublished ({$reason})");
+                            // }
+
+                            if ($rugProduct['publish_status'] == 'active') {
+                                $stats['published']++; // You might want to track published stats
+                                $this->log("   ✅ Product published , inventory: {$inventoryQty})");
                             } else {
-                                $this->unpublishProduct($shop, $shopifyProduct['id']);
                                 $stats['unpublished']++;
                             }
                         } else {
@@ -464,7 +493,8 @@ class DailyImportCommand extends Command
             $manageStock = ($product['inventory']['manageStock'] ?? false) === true;
 
             // Status: draft if out of stock, active only if available AND status=available
-            $status = ($newQty <= 0) ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft');
+            //$status = ($newQty <= 0) ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft');
+            //$status = (!empty($product['product_category']) && ($product['inventory']['quantityLevel'][0]['available'] ?? 0) > 0) ? 'active' : 'draft';
 
             // Title
             $updatedTitle = $product['title'] . ' #' . $sku;
@@ -555,16 +585,41 @@ class DailyImportCommand extends Command
                     'vendor'       => $product['vendor'] ?? 'Oriental Rug Mart',
                     'product_type' => !empty($product['constructionType']) ? ucfirst($product['constructionType']) : '',
                     'tags'         => implode(',', array_unique(array_filter($tags))),
-                    'status'       => $status,
+                    'status'       => $product['publish_status'],
                     'options'      => [
                         ['name' => 'Size',         'values' => [$size ?: 'Default']],
                         ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']],
                     ],
                     'variants' => [$variant],
-                    'images'   => array_map(fn($img, $i) => [
-                        'src'      => str_replace(' ', '%20', $img),
-                        'position' => $i + 1,
-                    ], $product['images'], array_keys($product['images'])),
+                    'images' => array_values(
+                        array_filter(
+                            array_map(function ($img, $i) {
+                                $img = trim($img);
+                                if (empty($img) || !preg_match('/^https?:\/\//i', $img)) return null;
+
+                                $parsed = parse_url($img);
+                                if (!$parsed || empty($parsed['host'])) return null;
+
+                                $path = implode('/', array_map(
+                                    fn($seg) => rawurlencode(rawurldecode($seg)),
+                                    explode('/', $parsed['path'] ?? '')
+                                ));
+
+                                $query = '';
+                                if (!empty($parsed['query'])) {
+                                    $query = '?' . implode('&', array_map(function ($part) {
+                                        [$k, $v] = array_pad(explode('=', $part, 2), 2, '');
+                                        return rawurlencode(rawurldecode($k)) . '=' . rawurlencode(rawurldecode($v));
+                                    }, explode('&', $parsed['query'])));
+                                }
+
+                                return [
+                                    'src'      => "{$parsed['scheme']}://{$parsed['host']}{$path}{$query}",
+                                    'position' => $i + 1,
+                                ];
+                            }, $product['images'], array_keys($product['images']))
+                        )
+                    ),
                 ],
             ];
 
@@ -830,7 +885,7 @@ class DailyImportCommand extends Command
             // ============================================================
             // DONE
             // ============================================================
-            $this->log("✅ [{$sku}] Product inserted successfully — Shopify ID: {$productId}, Status: {$status}, Qty: {$newQty}");
+            $this->log("✅ [{$sku}] Product inserted successfully — Shopify ID: {$productId}, Qty: {$newQty}");
             return true;
         } catch (\Exception $e) {
             $this->log("❌ [{$sku}] insertNewProduct exception: " . $e->getMessage());
@@ -1092,6 +1147,8 @@ class DailyImportCommand extends Command
                 $productPayload['product_type'] = ucfirst($rug['constructionType']);
             }
 
+            $productPayload['status'] = $rug['publish_status'];
+
             // Tags
             $tags = $this->buildProductTags($rug);
             if (!empty($tags)) {
@@ -1109,16 +1166,16 @@ class DailyImportCommand extends Command
 
             if ($response->successful()) {
                 $updatedFields[] = 'product_basic';
-                $this->log("      ✓ Product basic info updated");
+                $this->log("✓ Product basic info updated");
             } else {
-                $this->log("      ⚠️ Product basic update failed - Status: " . $response->status());
-                $this->log("      Response: " . $response->body());
+                $this->log("⚠️ Product basic update failed - Status: " . $response->status());
+                $this->log("Response: " . $response->body());
             }
 
             usleep(550000);
 
             // ===== STEP 2: ENSURE PRODUCT OPTIONS EXIST =====
-            $this->log("      🔧 Ensuring product options...");
+            $this->log("🔧 Ensuring product options...");
 
             $currentOptions = $fullProduct['options'] ?? [];
             $needsOptions = false;
@@ -1304,9 +1361,32 @@ class DailyImportCommand extends Command
             if (!empty($rug['images'])) {
                 $this->log("🔧 Updating images...");
 
-                $imagePayload = array_map(fn($img) => [
-                    'src' => str_replace(' ', '%20', $img)  // <-- Encode spaces
-                ], $rug['images']);
+                $imagePayload = array_values(
+                    array_filter(
+                        array_map(function ($img) {
+                            $img = trim($img);
+                            if (empty($img) || !preg_match('/^https?:\/\//i', $img)) return null;
+
+                            $parsed = parse_url($img);
+                            if (!$parsed || empty($parsed['host'])) return null;
+
+                            $path = implode('/', array_map(
+                                fn($seg) => rawurlencode(rawurldecode($seg)),
+                                explode('/', $parsed['path'] ?? '')
+                            ));
+
+                            $query = '';
+                            if (!empty($parsed['query'])) {
+                                $query = '?' . implode('&', array_map(function ($part) {
+                                    [$k, $v] = array_pad(explode('=', $part, 2), 2, '');
+                                    return rawurlencode(rawurldecode($k)) . '=' . rawurlencode(rawurldecode($v));
+                                }, explode('&', $parsed['query'])));
+                            }
+
+                            return ['src' => "{$parsed['scheme']}://{$parsed['host']}{$path}{$query}"];
+                        }, $rug['images'])
+                    )
+                );
 
                 $imageResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     ->withHeaders([

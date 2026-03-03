@@ -362,8 +362,6 @@ class SettingsController extends Controller
 
         return $entries;
     }
-
-
     public function update(Request $request)
     {
         $request->validate([
@@ -642,21 +640,8 @@ class SettingsController extends Controller
     }
 
 
-
-
     /**
      * updateShopifyProduct
-     *
-     * Your rug API inventory structure:
-     *   inventory.quantityLevel[0].available = 1   (single value, no per-sku breakdown)
-     *   inventory.manageStock = true
-     *
-     * Key fixes:
-     *  1. Variant: isSingleItem=true means ONE variant per product. We update only that
-     *     variant — no multi-variant loops creating wrong duplicates.
-     *  2. Inventory: reads directly from quantityLevel[0].available (no sku-map needed).
-     *     Sets inventory_management='shopify' on variant first, THEN calls inventory_levels/set.
-     *  3. Tags, metafields (upsert), images, status all fully updated.
      */
     private function updateShopifyProduct(array $rug, $settings, callable $sendMessage, int $progress = 0, ?callable $rateLimiter = null, ?int $cachedLocationId = null): bool
     {
@@ -793,8 +778,9 @@ class SettingsController extends Controller
             $newQty      = (int)($rug['inventory']['quantityLevel'][0]['available'] ?? 0);
             $manageStock = ($rug['inventory']['manageStock'] ?? false) === true;
 
-            // Status based on stock
-            $status = ($newQty <= 0) ? 'draft' : (($rug['status'] ?? '') === 'available' ? 'active' : 'draft');
+            // Status based on stock and active checks
+            //$status = ($newQty <= 0) ? 'draft' : (($rug['status'] ?? '') === 'available' ? 'active' : 'draft');
+            //$status = (!empty($product['product_category']) && ($product['inventory']['quantityLevel'][0]['available'] ?? 0) > 0) ? 'active' : 'draft';
 
             // ============================================================
             // BUILD TAGS (same logic as importProducts)
@@ -811,6 +797,7 @@ class SettingsController extends Controller
                     $tags[] = 'Rugs for Sale';
                 }
             }
+
 
             foreach (['constructionType', 'country', 'primaryMaterial', 'design', 'palette', 'pattern', 'styleTags', 'otherTags', 'foundation', 'region', 'rugType', 'productType'] as $field) {
                 if (!empty($rug[$field])) {
@@ -859,13 +846,13 @@ class SettingsController extends Controller
                         'vendor'       => $rug['vendor'] ?? 'Oriental Rug Mart',
                         'product_type' => !empty($rug['constructionType']) ? ucfirst($rug['constructionType']) : '',
                         'tags'         => implode(',', array_unique(array_filter($tags))),
-                        'status'       => $status,
+                        'status'       => $rug['publish_status'],
                     ],
                 ]);
 
             if ($basicResponse->successful()) {
                 $updatedFields[] = 'basic_info';
-                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Basic info updated (status: {$status}, qty: {$newQty})"]);
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Basic info updated"]);
             } else {
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Basic info failed ({$basicResponse->status()}): " . $basicResponse->body()]);
             }
@@ -1086,7 +1073,32 @@ class SettingsController extends Controller
                         ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token, 'Content-Type' => 'application/json'])
                         ->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
                             'product' => [
-                                'images' => array_map(fn($img) => ['src' => str_replace(' ', '%20', $img)], $rug['images']),
+                                'images' => array_values(
+                                    array_filter(
+                                        array_map(function ($img) {
+                                            $img = trim($img);
+                                            if (empty($img) || !preg_match('/^https?:\/\//i', $img)) return null;
+
+                                            $parsed = parse_url($img);
+                                            if (!$parsed || empty($parsed['host'])) return null;
+
+                                            $path = implode('/', array_map(
+                                                fn($seg) => rawurlencode(rawurldecode($seg)),
+                                                explode('/', $parsed['path'] ?? '')
+                                            ));
+
+                                            $query = '';
+                                            if (!empty($parsed['query'])) {
+                                                $query = '?' . implode('&', array_map(function ($part) {
+                                                    [$k, $v] = array_pad(explode('=', $part, 2), 2, '');
+                                                    return rawurlencode(rawurldecode($k)) . '=' . rawurlencode(rawurldecode($v));
+                                                }, explode('&', $parsed['query'])));
+                                            }
+
+                                            return ['src' => "{$parsed['scheme']}://{$parsed['host']}{$path}{$query}"];
+                                        }, $rug['images'])
+                                    )
+                                ),
                             ],
                         ]);
 
@@ -1618,6 +1630,14 @@ class SettingsController extends Controller
                         continue; // Skip products without a product category
                     }
 
+                    //$logs[] = ['message' => 'Product Images. (' . json_encode($product['images']) . ')  ', 'success' => false];
+                    //  $sendMessage([
+                    //         'progress' => $progress,
+                    //         'message' => json_encode($product['images']),
+                    //         'type' => 'progress',
+                    //         'success' => false
+                    //     ]);
+
                     // Check if product already exists in Shopify having same sku
                     $existingSkuProduct = $this->checkProductBySkuOrTitle($settings, $shopifyDomain, $sku, 'sku');
 
@@ -1816,15 +1836,32 @@ class SettingsController extends Controller
                             'tags' => implode(', ', array_unique($tags)),
                             "variants"     => $variants,
                             'gift_card' => false,
-                            'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
+                            //'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
+                            'status' => $product['publish_status']
                         ]
                     ];
 
                     // Add the first image as the featured image
                     if (!empty($product['images'])) {
                         $shopifyProduct['product']['images'] = array_map(function ($imgUrl, $i) {
+                            // Parse the URL to encode only the path/filename, not the entire URL
+                            $parsedUrl = parse_url($imgUrl);
+
+                            // Encode the path, handling special characters like [], spaces, etc.
+                            $encodedPath = implode('/', array_map(function ($segment) {
+                                return rawurlencode(rawurldecode($segment)); // decode first to avoid double-encoding
+                            }, explode('/', $parsedUrl['path'])));
+
+                            // Rebuild the full URL
+                            $encodedUrl = $parsedUrl['scheme'] . '://' . $parsedUrl['host'] . $encodedPath;
+
+                            // Append query string if present
+                            if (!empty($parsedUrl['query'])) {
+                                $encodedUrl .= '?' . $parsedUrl['query'];
+                            }
+
                             return [
-                                'src' => str_replace(' ', '%20', $imgUrl), // Encode spaces in URL
+                                'src'      => $encodedUrl,
                                 'position' => $i + 1,
                             ];
                         }, $product['images'], array_keys($product['images']));
@@ -2243,6 +2280,15 @@ class SettingsController extends Controller
                 //continue;
             }
 
+
+
+            $publish_status = 'draft';
+            $quantityValue = isset($product['inventory']['quantityLevel'][0]['available']) ? $product['inventory']['quantityLevel'][0]['available'] : 0;
+
+            if (($ownedActive || $consignmentActive) && $quantityValue > 0) {
+                $publish_status = 'active';
+            }
+
             // Process images - sort by position and extract URLs
             $images = $product['images'] ?? [];
             usort($images, function ($a, $b) {
@@ -2318,6 +2364,7 @@ class SettingsController extends Controller
                 'payoutPercentage' => $product['consignment']['payoutPercentage'] ?? '',
                 'images' => $image_urls,
                 'thumbnail' => !empty($image_urls) ? $image_urls[0] : '',
+                'publish_status' => $publish_status,
             ];
         }
 

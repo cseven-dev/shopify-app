@@ -2289,9 +2289,11 @@ class SettingsController extends Controller
                 $publish_status = 'active';
             }
 
-            // Process images - sort by position and extract URLs
+            // Process images - sort by isChosen first, then by position
             $images = $product['images'] ?? [];
             usort($images, function ($a, $b) {
+                $chosenDiff = ($b['isChosen'] === true) - ($a['isChosen'] === true);
+                if ($chosenDiff !== 0) return $chosenDiff;
                 return ($a['position'] ?? 0) <=> ($b['position'] ?? 0);
             });
 

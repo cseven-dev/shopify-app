@@ -19,6 +19,15 @@ class DailyImportCommand extends Command
     private $cronTrackingKey = 'daily_import_last_successful_run';
     private $cachedLocationId = null;
 
+    // -----------------------------------------------------------------
+    // FIX 2: Centralised rate-limit delays.
+    // Shopify REST API = 2 calls/second. Using 600 ms as the standard
+    // gap gives a comfortable safety margin. The old 200 ms value used
+    // in the metafield loops was the direct cause of 429 errors.
+    // -----------------------------------------------------------------
+    private const RATE_LIMIT_MS      = 600000;   // 0.6 s  – every Shopify call
+    private const RATE_LIMIT_FAST_MS = 300000;   // 0.3 s  – Rug API pagination only
+
     public function handle()
     {
         $this->log("╔══════════════════════════════════════════════════════════════╗");
@@ -71,8 +80,7 @@ class DailyImportCommand extends Command
 
             $this->markCronSuccess();
 
-            $this->log("
-╔══════════════════════════════════════════════════════════════╗");
+            $this->log("╔══════════════════════════════════════════════════════════════╗");
             $this->log("║          🎉 ALL SHOP IMPORTS COMPLETED SUCCESSFULLY          ║");
             $this->log("╚══════════════════════════════════════════════════════════════╝");
             $this->log("Completed at: " . now()->format('Y-m-d H:i:s'));
@@ -100,6 +108,25 @@ class DailyImportCommand extends Command
             'errors' => 0,
             'published' => 0
         ];
+
+        // -----------------------------------------------------------------
+        // FIX 1: In-memory deduplication map.
+        //
+        // WHY duplicates happen:
+        //   a) The Rug API sometimes returns the same SKU twice in one
+        //      paginated response.
+        //   b) Even when a SKU appears only once, Shopify's GraphQL search
+        //      index can take several seconds to reflect a freshly created
+        //      product. So if the cron processes the same SKU a second time
+        //      (e.g. from a previous partially-failed run overlapping this
+        //      one, or the API returning it on two pages), getShopifyProductBySKU()
+        //      still returns null and a second product gets created.
+        //
+        // FIX: track every SKU we successfully insert during this run.
+        // Before touching Shopify for any SKU, check this map first.
+        // If the SKU is already there, skip it entirely.
+        // -----------------------------------------------------------------
+        $insertedSkusThisRun = [];   // [ sku => shopifyProductId ]
 
         // Get days to look back
         $daysToLookBack = $this->getDaysToLookBack($shop);
@@ -157,7 +184,7 @@ class DailyImportCommand extends Command
         } catch (\Exception $e) {
             $this->log("⚠️ Location pre-fetch failed: " . $e->getMessage());
         }
-        usleep(550000);
+        usleep(self::RATE_LIMIT_MS);
 
         foreach ($batches as $batchNumber => $batch) {
             $this->log("🔄 Processing batch " . ($batchNumber + 1) . "/" . count($batches) . " (" . count($batch) . " products)");
@@ -174,6 +201,16 @@ class DailyImportCommand extends Command
                 try {
                     $this->log("📦 Processing SKU: {$sku}");
 
+                    // ---------------------------------------------------------
+                    // FIX 1 – guard: skip any SKU we already inserted this run.
+                    // This check runs BEFORE the expensive Shopify lookup and
+                    // prevents both causes of duplication described above.
+                    // ---------------------------------------------------------
+                    if (isset($insertedSkusThisRun[$sku])) {
+                        $this->log("⏭️  [{$sku}] Already inserted this run (Shopify ID: {$insertedSkusThisRun[$sku]}) — skipping duplicate");
+                        continue;
+                    }
+
                     // Check if product exists in Shopify
                     $shopifyProduct = $this->getShopifyProductBySKU($shop, $sku);
 
@@ -181,10 +218,13 @@ class DailyImportCommand extends Command
                         // Product not found - insert new
                         $this->log("⊘ Not found in Shopify - inserting new product");
 
-                        $inserted = $this->insertNewProduct($rugProduct, $shop->shopify_store_url);
+                        // insertNewProduct now returns the new Shopify product ID on
+                        // success (int) or false on failure, so we can register it.
+                        $newProductId = $this->insertNewProduct($rugProduct, $shop->shopify_store_url);
 
-                        if ($inserted) {
-                            $this->log("   ✅ Successfully inserted");
+                        if ($newProductId) {
+                            $this->log("   ✅ Successfully inserted (Shopify ID: {$newProductId})");
+                            $insertedSkusThisRun[$sku] = $newProductId;   // FIX 1: register
                             $stats['inserted']++;
                         } else {
                             $this->log("   ❌ Failed to insert");
@@ -201,7 +241,8 @@ class DailyImportCommand extends Command
                     // Fetch metafields
                     $metafields = $this->getShopifyProductMetafields($shop, $shopifyProduct['id']);
                     $shopifyProduct['metafields'] = $metafields;
-                    usleep(550000);
+                    usleep(self::RATE_LIMIT_MS);
+
                     // Find matching variant
                     $variant = null;
                     foreach ($shopifyProduct['variants'] as $v) {
@@ -319,13 +360,12 @@ class DailyImportCommand extends Command
                     $stats['errors']++;
                 }
 
-                usleep(550000); // Rate limiting
+                usleep(self::RATE_LIMIT_MS); // Rate limiting
             }
         }
 
         // Final summary
-        $this->log("
-╔══════════════════════════════════════════════════════════════╗");
+        $this->log("╔══════════════════════════════════════════════════════════════╗");
         $this->log("║                  PROCESSING SUMMARY                          ║");
         $this->log("╚══════════════════════════════════════════════════════════════╝");
         $this->log("📊 Total Rug API products: {$stats['total_rug_products']}");
@@ -409,8 +449,14 @@ class DailyImportCommand extends Command
      *  - Same metafield list (dimensions, shipping dims, 30+ text fields, rental price, source flag)
      *  - Inventory set via inventory_levels/set AFTER creation (not via inventory_quantity on variant)
      *  - Status: active if available qty > 0 AND status === 'available', else draft
+     *
+     * CHANGED: return type is now int|false instead of bool.
+     * Returns the new Shopify product ID on success so the caller can register
+     * it in $insertedSkusThisRun and prevent duplicate inserts.
+     *
+     * @return int|false  New Shopify product ID on success, false on failure.
      */
-    private function insertNewProduct(array $product, string $shopUrl): bool
+    private function insertNewProduct(array $product, string $shopUrl)
     {
         try {
             // ============================================================
@@ -646,7 +692,7 @@ class DailyImportCommand extends Command
             }
 
             $this->log("   ✓ [{$sku}] Product created — Shopify ID: {$productId}");
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             // ============================================================
             // STEP 2: SET INVENTORY via inventory_levels/set
@@ -659,7 +705,6 @@ class DailyImportCommand extends Command
                     $inventoryItemId = $createdVariant['inventory_item_id'] ?? null;
 
                     if ($inventoryItemId) {
-                        // Get location
                         // Get location (use cached if available)
                         $locationId = $this->cachedLocationId;
                         if (!$locationId) {
@@ -670,6 +715,7 @@ class DailyImportCommand extends Command
                             if ($locResponse->successful() && !empty($locResponse->json('locations'))) {
                                 $locationId = $locResponse->json('locations')[0]['id'];
                             }
+                            usleep(self::RATE_LIMIT_MS);
                         }
 
                         // $locResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
@@ -680,8 +726,6 @@ class DailyImportCommand extends Command
                         //$locationId = $locResponse->json('locations')[0]['id'];
 
                         if ($locationId) {
-                            usleep(550000);
-
                             $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                                 ->withHeaders([
                                     'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -697,6 +741,7 @@ class DailyImportCommand extends Command
                             } else {
                                 $this->log("   ⚠️ [{$sku}] Inventory set failed: " . $invResponse->body());
                             }
+                            usleep(self::RATE_LIMIT_MS);
                         }
                         //} else {
                         //$this->log("   ⚠️ [{$sku}] No locations found — inventory skipped");
@@ -707,8 +752,6 @@ class DailyImportCommand extends Command
                 } catch (\Exception $e) {
                     $this->log("   ⚠️ [{$sku}] Inventory exception: " . $e->getMessage());
                 }
-
-                usleep(400000);
             } else {
                 $this->log("   ℹ️ [{$sku}] Inventory skipped (manageStock=" . ($manageStock ? 'true' : 'false') . ", qty={$newQty})");
             }
@@ -877,7 +920,7 @@ class DailyImportCommand extends Command
                 }
 
                 //usleep(150000); // Rate limit between metafield POSTs
-                usleep(550000);
+                usleep(self::RATE_LIMIT_MS);   // FIX 2: consistent rate limit constant
             }
 
             $this->log("   ✓ [{$sku}] {$metaCount}/" . count($metafields) . " metafields added");
@@ -886,7 +929,9 @@ class DailyImportCommand extends Command
             // DONE
             // ============================================================
             $this->log("✅ [{$sku}] Product inserted successfully — Shopify ID: {$productId}, Qty: {$newQty}");
-            return true;
+
+            return $productId;   // FIX 1: return the new product ID instead of true
+
         } catch (\Exception $e) {
             $this->log("❌ [{$sku}] insertNewProduct exception: " . $e->getMessage());
             return false;
@@ -1172,7 +1217,7 @@ class DailyImportCommand extends Command
                 $this->log("Response: " . $response->body());
             }
 
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             // ===== STEP 2: ENSURE PRODUCT OPTIONS EXIST =====
             $this->log("🔧 Ensuring product options...");
@@ -1230,7 +1275,7 @@ class DailyImportCommand extends Command
                     $this->log("⚠️ Failed to add options - Status: " . $optionsResponse->status());
                 }
 
-                usleep(550000);
+                usleep(self::RATE_LIMIT_MS);
             }
 
             // ===== STEP 3: UPDATE VARIANT =====
@@ -1298,7 +1343,7 @@ class DailyImportCommand extends Command
                 // Don't return false - continue with other updates
             }
 
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             // ===== STEP 4: UPDATE INVENTORY =====
             if (isset($rug['inventory']['quantityLevel'][0]['available'])) {
@@ -1321,19 +1366,18 @@ class DailyImportCommand extends Command
                                 $locationId = $locations[0]['id'];
                             }
                         }
+                        usleep(self::RATE_LIMIT_MS);
                     }
 
                     // $locationsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                     //         ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
                     //         ->get("https://{$shopifyDomain}/admin/api/2025-07/locations.json");
 
-
                     //if ($locationsResponse->successful()) {
                     //$locations = $locationsResponse->json('locations');
                     //if (!empty($locations)) {
                     //$locationId = $locations[0]['id'];
                     if ($locationId) {
-                        usleep(550000);
                         $invResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                             ->withHeaders([
                                 'X-Shopify-Access-Token' => $settings->shopify_token,
@@ -1350,6 +1394,7 @@ class DailyImportCommand extends Command
                         } else {
                             $this->log("      ⚠️ Inventory update failed");
                         }
+                        usleep(self::RATE_LIMIT_MS);
                     }
 
                     //}
@@ -1403,7 +1448,7 @@ class DailyImportCommand extends Command
                     $this->log("      ⚠️ Images update failed");
                 }
 
-                usleep(550000);
+                usleep(self::RATE_LIMIT_MS);
             }
 
             // ===== STEP 6: UPDATE METAFIELDS =====
@@ -1438,7 +1483,7 @@ class DailyImportCommand extends Command
                                 $metaUpdates++;
                             }
 
-                            usleep(200000);
+                            usleep(self::RATE_LIMIT_MS);   // FIX 2: was 200000 — caused 429s
                         }
                     }
                 }
@@ -1504,11 +1549,10 @@ class DailyImportCommand extends Command
                             $metaUpdates++;
                         }
 
-                        usleep(200000);
+                        usleep(self::RATE_LIMIT_MS);   // FIX 2: was 200000 — caused 429s
                     }
                 }
             }
-
 
             // ✅ Static field 1: custom.source → always true (boolean)
             if (empty($existingMetafields['custom.source']['id'])) {
@@ -1537,7 +1581,7 @@ class DailyImportCommand extends Command
                     ]);
             }
 
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             // ✅ Static field 2: custom.cron_updated → always "yes" (single_line_text_field)
             if (empty($existingMetafields['custom.cron_updated']['id'])) {
@@ -1566,8 +1610,7 @@ class DailyImportCommand extends Command
                     ]);
             }
 
-            usleep(550000);
-
+            usleep(self::RATE_LIMIT_MS);
 
             if ($metaUpdates > 0) {
                 $updatedFields[] = "{$metaUpdates}_metafields";
@@ -1600,8 +1643,7 @@ class DailyImportCommand extends Command
         $skip = 0;
         $pageNumber = 1;
 
-        $this->log("
-🔄 Fetching all products from Rug API...");
+        $this->log("🔄 Fetching all products from Rug API...");
 
         while (true) {
             try {
@@ -1634,7 +1676,7 @@ class DailyImportCommand extends Command
                 if ($pagination && isset($pagination['next']) && $pagination['next'] !== null) {
                     $skip += $limit;
                     $pageNumber++;
-                    usleep(200000);
+                    usleep(self::RATE_LIMIT_FAST_MS);
                 } else {
                     break;
                 }
@@ -1711,7 +1753,7 @@ class DailyImportCommand extends Command
             $matchedVariant = array_values($exactMatches)[0]['node'];
             $productId = $matchedVariant['product']['legacyResourceId'];
 
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             // Fetch full product using numeric REST ID
             $productResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
@@ -1724,7 +1766,7 @@ class DailyImportCommand extends Command
                 return null;
             }
 
-            usleep(550000);
+            usleep(self::RATE_LIMIT_MS);
 
             return $productResponse->json('product');
         } catch (\Exception $e) {
@@ -1738,23 +1780,23 @@ class DailyImportCommand extends Command
     //     try {
     //         $limit = 250;
     //         $pageInfo = null;
-
+    //
     //         do {
     //             $url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}";
     //             //$url = "https://{$shop->shopify_store_url}/admin/api/2025-07/products.json?limit={$limit}&fields=id,title,variants,tags,vendor,product_type,body_html,images,updated_at";
-
+    //
     //             if ($pageInfo) $url .= "&page_info={$pageInfo}";
-
+    //
     //             $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
     //                 ->withHeaders([
     //                     'X-Shopify-Access-Token' => $shop->shopify_token,
     //                     'Content-Type' => 'application/json',
     //                 ])->get($url);
-
+    //
     //             if (!$response->successful()) return null;
-
+    //
     //             $products = $response->json('products', []);
-
+    //
     //             foreach ($products as $product) {
     //                 foreach ($product['variants'] ?? [] as $variant) {
     //                     if (($variant['sku'] ?? '') === $sku) {
@@ -1762,7 +1804,7 @@ class DailyImportCommand extends Command
     //                     }
     //                 }
     //             }
-
+    //
     //             $linkHeader = $response->header('Link');
     //             if ($linkHeader && preg_match('/page_info=([^&>]+)/', $linkHeader, $matches)) {
     //                 $pageInfo = $matches[1];
@@ -1770,7 +1812,7 @@ class DailyImportCommand extends Command
     //                 $pageInfo = null;
     //             }
     //         } while ($pageInfo);
-
+    //
     //         return null;
     //     } catch (\Exception $e) {
     //         return null;

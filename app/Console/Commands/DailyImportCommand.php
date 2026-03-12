@@ -672,7 +672,13 @@ class DailyImportCommand extends Command
             // ============================================================
             // STEP 1: CREATE PRODUCT
             // ============================================================
-            $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+            // $response = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+            //     ->withHeaders([
+            //         'X-Shopify-Access-Token' => $settings->shopify_token,
+            //         'Content-Type'           => 'application/json',
+            //     ])->post("https://{$shopifyDomain}/admin/api/2025-07/products.json", $shopifyProduct);
+
+            $response = Http::timeout(60)->connectTimeout(30)
                 ->withHeaders([
                     'X-Shopify-Access-Token' => $settings->shopify_token,
                     'Content-Type'           => 'application/json',

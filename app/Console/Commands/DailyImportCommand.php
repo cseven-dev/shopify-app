@@ -564,7 +564,7 @@ class DailyImportCommand extends Command
                 }
             }
 
-            foreach (['constructionType', 'country', 'primaryMaterial', 'design', 'palette', 'pattern', 'styleTags', 'otherTags', 'foundation', 'region', 'rugType', 'productType'] as $field) {
+            foreach (['constructionType', 'country', 'primaryMaterial', 'design', 'palette', 'pattern', 'styleTags', 'otherTags', 'period', 'region', 'rugType', 'productType'] as $field) {
                 if (!empty($product[$field])) {
                     if (is_string($product[$field]) && strpos($product[$field], ',') !== false) {
                         foreach (array_map('trim', explode(',', $product[$field])) as $v) {

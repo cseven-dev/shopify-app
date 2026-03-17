@@ -799,7 +799,22 @@ class SettingsController extends Controller
             }
 
 
-            foreach (['constructionType', 'country', 'primaryMaterial', 'design', 'palette', 'pattern', 'styleTags', 'otherTags', 'foundation', 'region', 'rugType', 'productType'] as $field) {
+            foreach (
+                [
+                    'constructionType',
+                    'country',
+                    'primaryMaterial',
+                    'design',
+                    'palette',
+                    'pattern',
+                    'styleTags',
+                    'otherTags',
+                    'period',
+                    'region',
+                    'rugType',
+                    'productType'
+                ] as $field
+            ) {
                 if (!empty($rug[$field])) {
                     if (is_string($rug[$field]) && strpos($rug[$field], ',') !== false) {
                         foreach (array_map('trim', explode(',', $rug[$field])) as $v) {
@@ -1691,10 +1706,10 @@ class SettingsController extends Controller
                         'palette',
                         'pattern',
                         //'pile',
-                        //'period',
+                        'period',
                         'styleTags',
                         'otherTags',
-                        'foundation',
+                        //'foundation',
                         //'age',
                         //'quality',
                         'region',

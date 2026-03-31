@@ -769,6 +769,30 @@ class SettingsController extends Controller
             $compareAtPrice = (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice)
                 ? $regularPrice : null;
 
+            // ======= EcomPublish =======
+            $ecomPublish = $rug['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $rug['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+                $compareAtPrice = null;
+            }
+            // ======= END EcomPublish =======
+
+
             $updatedTitle = $rug['title'] . ' #' . $rug['ID'];
             if (!empty($size)) {
                 $updatedTitle = $size . ' ' . $updatedTitle;
@@ -861,7 +885,8 @@ class SettingsController extends Controller
                         'vendor'       => $rug['vendor'] ?? 'Oriental Rug Mart',
                         'product_type' => !empty($rug['constructionType']) ? ucfirst($rug['constructionType']) : '',
                         'tags'         => implode(',', array_unique(array_filter($tags))),
-                        'status'       => $rug['publish_status'],
+                        //'status'       => $rug['publish_status'],
+                        'status'       => $publishStatus,
                     ],
                 ]);
 
@@ -972,7 +997,7 @@ class SettingsController extends Controller
 
             if ($variantResponse->successful()) {
                 $updatedFields[] = 'variant';
-                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Variant updated (price: {$currentPrice})"]);
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Variant updated"]);
             } else {
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Variant update failed ({$variantResponse->status()}): " . $variantResponse->body()]);
             }
@@ -1241,6 +1266,8 @@ class SettingsController extends Controller
                     'agreedLowPrice' => 'agreed_low_price',
                     'agreedHighPrice' => 'agreed_high_price',
                     'payoutPercentage' => 'payout_percentage',
+                    'ecomPublish' => 'ecom_publish',
+                    'ecomPublishNote' => 'ecom_publish_note',
                 ] as $field => $key
             ) {
                 if (array_key_exists($field, $rug) && $rug[$field] !== null && $rug[$field] !== '') {
@@ -1856,6 +1883,30 @@ class SettingsController extends Controller
 
                     $variants = [$variantData];
 
+                    // ======= EcomPublish Logic =======
+                    $ecomPublish = $product['ecomPublish'] ?? null;
+
+                    if ($ecomPublish === 'publish') {
+                        $publishStatus = 'active';
+                        $suppressPrice = false;
+                    } elseif ($ecomPublish === 'publish_without_price') {
+                        $publishStatus = 'active';
+                        $suppressPrice = true;
+                    } elseif ($ecomPublish === 'no_publish') {
+                        $publishStatus = 'draft';
+                        $suppressPrice = false;
+                    } else {
+                        $publishStatus = $product['publish_status']; // default behaviour
+                        $suppressPrice = false;
+                    }
+
+                    if ($suppressPrice) {
+                        $variantData['price'] = '0.00';
+                        unset($variantData['compare_at_price']);
+                        $variants = [$variantData]; // rebuild with suppressed price
+                    }
+                    // ======= END EcomPublish BLOCK =======
+
                     $updatedTitle = $product['title'] . ' #' . $product['ID'];
 
                     if (isset($size) && $size != '') {
@@ -1880,7 +1931,8 @@ class SettingsController extends Controller
                             "variants"     => $variants,
                             'gift_card' => false,
                             //'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
-                            'status' => $product['publish_status']
+                            // 'status' => $product['publish_status'],
+                            'status'       => $publishStatus,
                         ]
                     ];
 
@@ -1972,7 +2024,9 @@ class SettingsController extends Controller
                         'parentId'           => 'parent_id',
                         'agreedLowPrice'     => 'agreed_low_price',
                         'agreedHighPrice'    => 'agreed_high_price',
-                        'payoutPercentage'   => 'payout_percentage'
+                        'payoutPercentage'   => 'payout_percentage',
+                        'ecomPublish' => 'ecom_publish',
+                        'ecomPublishNote' => 'ecom_publish_note',
                     ];
 
                     // Loop and merge extra metafields
@@ -2425,6 +2479,8 @@ class SettingsController extends Controller
                 'images' => $image_urls,
                 'thumbnail' => !empty($image_urls) ? $image_urls[0] : '',
                 'publish_status' => $publish_status,
+                'ecomPublish' => $product['ecomPublish'] ?? '',
+                'ecomPublishNote' => $product['ecomPublishNote'] ?? '',
             ];
         }
 

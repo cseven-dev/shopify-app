@@ -534,6 +534,29 @@ class DailyImportCommand extends Command
             $compareAtPrice = (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice)
                 ? $regularPrice : null;
 
+            // ======= EcomPublish Logic =======
+            $ecomPublish = $product['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $product['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+                $compareAtPrice = null;
+            }
+            // ======= END EcomPublish Logic =======
+
             // Inventory: single quantityLevel[0].available — no per-sku breakdown in your API
             $newQty      = (int)($product['inventory']['quantityLevel'][0]['available'] ?? 0);
             $manageStock = ($product['inventory']['manageStock'] ?? false) === true;
@@ -636,7 +659,12 @@ class DailyImportCommand extends Command
                 "grams"                => $product['weight_grams'] ?? 0,
             ], $variantOptionKeys); // Merges option1/option2 only if they exist
 
-            if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+            // if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+            //     $variantData['compare_at_price'] = $regularPrice;
+            // }
+
+            // Only add compare_at_price if not suppressed
+            if (!$suppressPrice && !empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
                 $variantData['compare_at_price'] = $regularPrice;
             }
 
@@ -652,7 +680,8 @@ class DailyImportCommand extends Command
                     'vendor'       => $product['vendor'] ?? 'Oriental Rug Mart',
                     'product_type' => !empty($product['constructionType']) ? ucfirst($product['constructionType']) : '',
                     'tags'         => implode(',', array_unique(array_filter($tags))),
-                    'status'       => $product['publish_status'],
+                    //'status'       => $product['publish_status'],
+                    'status'       => $publishStatus,
                     'options'      => $options,
                     'variants' => $variants,
                     'images' => array_values(
@@ -850,6 +879,8 @@ class DailyImportCommand extends Command
                 'agreedLowPrice'      => 'agreed_low_price',
                 'agreedHighPrice'     => 'agreed_high_price',
                 'payoutPercentage'    => 'payout_percentage',
+                'ecomPublish' => 'ecom_publish',
+                'ecomPublishNote' => 'ecom_publish_note',
             ];
 
             foreach ($textMetaMap as $field => $key) {
@@ -1192,6 +1223,28 @@ class DailyImportCommand extends Command
             $sellingPrice = $rug['sellingPrice'] ?? null;
             $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
 
+            // ======= EcomPublish Logic =======
+            $ecomPublish = $rug['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $rug['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+            }
+            // ======= END EcomPublish Logic =======
+
             $colors = [];
             if (!empty($rug['colourTags'])) {
                 $colors = array_map('trim', explode(',', $rug['colourTags']));
@@ -1216,7 +1269,8 @@ class DailyImportCommand extends Command
                 $productPayload['product_type'] = ucfirst($rug['constructionType']);
             }
 
-            $productPayload['status'] = $rug['publish_status'];
+            //$productPayload['status'] = $rug['publish_status'];
+            $productPayload['status'] = $publishStatus;
 
             // Tags
             $tags = $this->buildProductTags($rug);
@@ -1334,6 +1388,13 @@ class DailyImportCommand extends Command
                 'sku' => $rug['ID'],
                 'price' => $currentPrice,
             ];
+
+            // Only add compare_at_price if not suppressed
+            if (!$suppressPrice && !empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                $variantPayload['compare_at_price'] = $regularPrice;
+            } else {
+                $variantPayload['compare_at_price'] = $suppressPrice ? null : null;
+            }
 
             //Only add option1/option2 if values actually exist
             if (!empty($sizeValue))    $variantPayload['option1'] = $sizeValue;
@@ -1555,6 +1616,8 @@ class DailyImportCommand extends Command
                 'agreedLowPrice' => 'agreed_low_price',
                 'agreedHighPrice' => 'agreed_high_price',
                 'payoutPercentage' => 'payout_percentage',
+                'ecomPublish' => 'ecom_publish',
+                'ecomPublishNote' => 'ecom_publish_note',
             ];
 
             foreach ($metaFieldMap as $field => $key) {
@@ -1722,7 +1785,7 @@ class DailyImportCommand extends Command
 
         foreach ($products as $product) {
 
-            //if (count($filtered) >= 5) break; // temp test stop on 5
+           // if (count($filtered) >= 5) break; // temp test stop on 5
 
             $updatedAt = $product['updated_at'] ?? null;
             if (empty($updatedAt)) continue;

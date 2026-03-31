@@ -534,6 +534,29 @@ class DailyImportCommand extends Command
             $compareAtPrice = (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice)
                 ? $regularPrice : null;
 
+            // ======= EcomPublish Logic =======
+            $ecomPublish = $product['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $product['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+                $compareAtPrice = null;
+            }
+            // ======= END EcomPublish Logic =======
+
             // Inventory: single quantityLevel[0].available — no per-sku breakdown in your API
             $newQty      = (int)($product['inventory']['quantityLevel'][0]['available'] ?? 0);
             $manageStock = ($product['inventory']['manageStock'] ?? false) === true;
@@ -605,21 +628,47 @@ class DailyImportCommand extends Command
             // Do NOT set inventory_quantity here — we use inventory_levels/set after creation.
             // inventory_management='shopify' is required so the set call works.
             // ============================================================
-            $variant = [
-                'sku'                  => $sku,
-                'price'                => $currentPrice,
-                'option1'              => $size ?: 'Default',
-                'option2'              => $nominalSize ?: 'Default',
-                'inventory_management' => $manageStock ? 'shopify' : null,
-                'requires_shipping'    => true,
-                'taxable'              => true,
-                'fulfillment_service'  => 'manual',
-                'grams'                => $product['weight_grams'] ?? 0,
-            ];
+            // //Build variants
+            $variants = [];
 
-            if ($compareAtPrice) {
-                $variant['compare_at_price'] = $compareAtPrice;
+            // Build variants
+            // Build options and variant option keys dynamically
+            $options = [];
+            $variantOptionKeys = [];
+
+            if (!empty(trim($size ?? ''))) {
+                $options[] = ["name" => "Size", "values" => [$size]];
+                $variantOptionKeys['option1'] = $size;
             }
+
+            if (!empty(trim($nominalSize ?? ''))) {
+                $options[] = ["name" => "Nominal Size", "values" => [$nominalSize]];
+                $key = count($variantOptionKeys) === 0 ? 'option1' : 'option2';
+                $variantOptionKeys[$key] = $nominalSize;
+            }
+
+            // Build variant
+            $variantData = array_merge([
+                "price"                => $currentPrice,
+                'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                'inventory_quantity'   => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                'sku'                  => $product['ID'] ?? '',
+                "requires_shipping"    => true,
+                "taxable"              => true,
+                "fulfillment_service"  => "manual",
+                "grams"                => $product['weight_grams'] ?? 0,
+            ], $variantOptionKeys); // Merges option1/option2 only if they exist
+
+            // if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+            //     $variantData['compare_at_price'] = $regularPrice;
+            // }
+
+            // Only add compare_at_price if not suppressed
+            if (!$suppressPrice && !empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                $variantData['compare_at_price'] = $regularPrice;
+            }
+
+            $variants = [$variantData];
 
             // ============================================================
             // BUILD PRODUCT PAYLOAD
@@ -631,12 +680,10 @@ class DailyImportCommand extends Command
                     'vendor'       => $product['vendor'] ?? 'Oriental Rug Mart',
                     'product_type' => !empty($product['constructionType']) ? ucfirst($product['constructionType']) : '',
                     'tags'         => implode(',', array_unique(array_filter($tags))),
-                    'status'       => $product['publish_status'],
-                    'options'      => [
-                        ['name' => 'Size',         'values' => [$size ?: 'Default']],
-                        ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']],
-                    ],
-                    'variants' => [$variant],
+                    //'status'       => $product['publish_status'],
+                    'status'       => $publishStatus,
+                    'options'      => $options,
+                    'variants' => $variants,
                     'images' => array_values(
                         array_filter(
                             array_map(function ($img, $i) {
@@ -832,6 +879,8 @@ class DailyImportCommand extends Command
                 'agreedLowPrice'      => 'agreed_low_price',
                 'agreedHighPrice'     => 'agreed_high_price',
                 'payoutPercentage'    => 'payout_percentage',
+                'ecomPublish' => 'ecom_publish',
+                'ecomPublishNote' => 'ecom_publish_note',
             ];
 
             foreach ($textMetaMap as $field => $key) {
@@ -1174,6 +1223,28 @@ class DailyImportCommand extends Command
             $sellingPrice = $rug['sellingPrice'] ?? null;
             $currentPrice = !empty($sellingPrice) ? $sellingPrice : $regularPrice;
 
+            // ======= EcomPublish Logic =======
+            $ecomPublish = $rug['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $rug['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+            }
+            // ======= END EcomPublish Logic =======
+
             $colors = [];
             if (!empty($rug['colourTags'])) {
                 $colors = array_map('trim', explode(',', $rug['colourTags']));
@@ -1198,7 +1269,8 @@ class DailyImportCommand extends Command
                 $productPayload['product_type'] = ucfirst($rug['constructionType']);
             }
 
-            $productPayload['status'] = $rug['publish_status'];
+            //$productPayload['status'] = $rug['publish_status'];
+            $productPayload['status'] = $publishStatus;
 
             // Tags
             $tags = $this->buildProductTags($rug);
@@ -1231,57 +1303,64 @@ class DailyImportCommand extends Command
             $currentOptions = $fullProduct['options'] ?? [];
             $needsOptions = false;
 
-            // Check if we have all 3 options
-            $hasSize = false;
-            $hasNominal = false;
+            $sizeValue    = !empty(trim($size ?? ''))        ? $size        : null;
+            $nominalValue = !empty(trim($nominalSize ?? '')) ? $nominalSize : null;
 
-            foreach ($currentOptions as $option) {
-                $optionName = strtolower($option['name'] ?? '');
-                if ($optionName === 'size') $hasSize = true;
-                if ($optionName === 'nominal size') $hasNominal = true;
-            }
+            // ✅ Skip options entirely if no size data exists
+            if (!empty($sizeValue) || !empty($nominalValue)) {
 
-            if (!$hasSize || !$hasNominal) {
-                $needsOptions = true;
-                $this->log("⚠️ Missing product options - will add them");
+                // Check if we have all 3 options
+                $hasSize = false;
+                $hasNominal = false;
 
-                // Add missing options
-                $optionsPayload = [];
-                if (!$hasSize) {
-                    $optionsPayload[] = ['name' => 'Size', 'values' => [$size ?: 'Default']];
-                }
-                if (!$hasNominal) {
-                    $optionsPayload[] = ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']];
+                foreach ($currentOptions as $option) {
+                    $optionName = strtolower($option['name'] ?? '');
+                    if ($optionName === 'size') $hasSize = true;
+                    if ($optionName === 'nominal size') $hasNominal = true;
                 }
 
-                // Update product with options
-                $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
-                    ->withHeaders([
-                        'X-Shopify-Access-Token' => $settings->shopify_token,
-                        'Content-Type' => 'application/json',
-                    ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
-                        'product' => [
-                            'options' => array_merge($currentOptions, $optionsPayload)
-                        ]
-                    ]);
+                if (!$hasSize || !$hasNominal) {
+                    $needsOptions = true;
+                    $this->log("⚠️ Missing product options - will add them");
 
-                if ($optionsResponse->successful()) {
-                    $this->log("✓ Product options added");
-                    $updatedFields[] = 'options_added';
-
-                    // Refresh product data
-                    $refreshResponse = Http::timeout(60)->connectTimeout(30)
-                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                        ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
-
-                    if ($refreshResponse->successful()) {
-                        $fullProduct = $refreshResponse->json('product');
+                    // Add missing options
+                    $optionsPayload = [];
+                    if (!$hasSize && !empty($sizeValue)) {
+                        $optionsPayload[] = ['name' => 'Size', 'values' => [$sizeValue]];
                     }
-                } else {
-                    $this->log("⚠️ Failed to add options - Status: " . $optionsResponse->status());
-                }
+                    if (!$hasNominal && !empty($nominalValue)) {
+                        $optionsPayload[] = ['name' => 'Nominal Size', 'values' => [$nominalValue]];
+                    }
 
-                usleep(self::RATE_LIMIT_MS);
+                    // Update product with options
+                    $optionsResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                        ->withHeaders([
+                            'X-Shopify-Access-Token' => $settings->shopify_token,
+                            'Content-Type' => 'application/json',
+                        ])->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                            'product' => [
+                                'options' => array_merge($currentOptions, $optionsPayload)
+                            ]
+                        ]);
+
+                    if ($optionsResponse->successful()) {
+                        $this->log("✓ Product options added");
+                        $updatedFields[] = 'options_added';
+
+                        // Refresh product data
+                        $refreshResponse = Http::timeout(60)->connectTimeout(30)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
+
+                        if ($refreshResponse->successful()) {
+                            $fullProduct = $refreshResponse->json('product');
+                        }
+                    } else {
+                        $this->log("⚠️ Failed to add options - Status: " . $optionsResponse->status());
+                    }
+
+                    usleep(self::RATE_LIMIT_MS);
+                }
             }
 
             // ===== STEP 3: UPDATE VARIANT =====
@@ -1310,13 +1389,16 @@ class DailyImportCommand extends Command
                 'price' => $currentPrice,
             ];
 
-            // Only update options if they're defined
-            if ($hasSize || $needsOptions) {
-                $variantPayload['option1'] = $size ?: 'Default';
+            // Only add compare_at_price if not suppressed
+            if (!$suppressPrice && !empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
+                $variantPayload['compare_at_price'] = $regularPrice;
+            } else {
+                $variantPayload['compare_at_price'] = $suppressPrice ? null : null;
             }
-            if ($hasNominal || $needsOptions) {
-                $variantPayload['option2'] = $nominalSize ?: 'Default';
-            }
+
+            //Only add option1/option2 if values actually exist
+            if (!empty($sizeValue))    $variantPayload['option1'] = $sizeValue;
+            if (!empty($nominalValue)) $variantPayload['option2'] = $nominalValue;
 
             if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
                 $variantPayload['compare_at_price'] = $regularPrice;
@@ -1342,10 +1424,10 @@ class DailyImportCommand extends Command
 
             if ($variantResponse->successful()) {
                 $updatedFields[] = 'variant';
-                $this->log("      ✓ Variant updated");
+                $this->log("✓ Variant updated");
             } else {
-                $this->log("      ⚠️ Variant update failed - Status: " . $variantResponse->status());
-                $this->log("      Response: " . $variantResponse->body());
+                $this->log("⚠️ Variant update failed - Status: " . $variantResponse->status());
+                $this->log("Response: " . $variantResponse->body());
                 // Don't return false - continue with other updates
             }
 
@@ -1534,6 +1616,8 @@ class DailyImportCommand extends Command
                 'agreedLowPrice' => 'agreed_low_price',
                 'agreedHighPrice' => 'agreed_high_price',
                 'payoutPercentage' => 'payout_percentage',
+                'ecomPublish' => 'ecom_publish',
+                'ecomPublishNote' => 'ecom_publish_note',
             ];
 
             foreach ($metaFieldMap as $field => $key) {
@@ -1700,6 +1784,9 @@ class DailyImportCommand extends Command
         $filtered = [];
 
         foreach ($products as $product) {
+
+           // if (count($filtered) >= 5) break; // temp test stop on 5
+
             $updatedAt = $product['updated_at'] ?? null;
             if (empty($updatedAt)) continue;
 
@@ -1713,6 +1800,8 @@ class DailyImportCommand extends Command
             }
         }
 
+        // Return only first 5 products
+        //return array_slice($filtered, 0, 5);
         return $filtered;
     }
 

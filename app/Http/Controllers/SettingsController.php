@@ -656,7 +656,7 @@ class SettingsController extends Controller
         $sendMessage([
             'type'     => 'progress',
             'progress' => $progress,
-            'message'  => "   🔧 Updating SKU: {$sku}",
+            'message'  => "🔧 Updating SKU: {$sku}",
         ]);
 
         try {
@@ -769,6 +769,30 @@ class SettingsController extends Controller
             $compareAtPrice = (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice)
                 ? $regularPrice : null;
 
+            // ======= EcomPublish =======
+            $ecomPublish = $rug['ecomPublish'] ?? null;
+
+            if ($ecomPublish === 'publish') {
+                $publishStatus = 'active';
+                $suppressPrice = false;
+            } elseif ($ecomPublish === 'publish_without_price') {
+                $publishStatus = 'active';
+                $suppressPrice = true;
+            } elseif ($ecomPublish === 'no_publish') {
+                $publishStatus = 'draft';
+                $suppressPrice = false;
+            } else {
+                $publishStatus = $rug['publish_status']; // default behaviour
+                $suppressPrice = false;
+            }
+
+            if ($suppressPrice) {
+                $currentPrice   = '0.00';
+                $compareAtPrice = null;
+            }
+            // ======= END EcomPublish =======
+
+
             $updatedTitle = $rug['title'] . ' #' . $rug['ID'];
             if (!empty($size)) {
                 $updatedTitle = $size . ' ' . $updatedTitle;
@@ -861,7 +885,8 @@ class SettingsController extends Controller
                         'vendor'       => $rug['vendor'] ?? 'Oriental Rug Mart',
                         'product_type' => !empty($rug['constructionType']) ? ucfirst($rug['constructionType']) : '',
                         'tags'         => implode(',', array_unique(array_filter($tags))),
-                        'status'       => $rug['publish_status'],
+                        //'status'       => $rug['publish_status'],
+                        'status'       => $publishStatus,
                     ],
                 ]);
 
@@ -877,40 +902,50 @@ class SettingsController extends Controller
             // ============================================================
             // STEP 5: ENSURE OPTIONS (Size + Nominal Size)
             // ============================================================
-            $currentOptions = $fullProduct['options'] ?? [];
-            $hasSize = $hasNominal = false;
-            foreach ($currentOptions as $opt) {
-                $n = strtolower($opt['name'] ?? '');
-                if ($n === 'size')         $hasSize    = true;
-                if ($n === 'nominal size') $hasNominal = true;
-            }
 
-            if (!$hasSize || !$hasNominal) {
-                $optResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
-                    ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token, 'Content-Type' => 'application/json'])
-                    ->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
-                        'product' => [
-                            'options' => [
-                                ['name' => 'Size',         'values' => [$size ?: 'Default']],
-                                ['name' => 'Nominal Size', 'values' => [$nominalSize ?: 'Default']],
-                            ],
-                        ],
-                    ]);
 
-                if ($optResponse->successful()) {
-                    $updatedFields[] = 'options';
-                    $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Options set (Size / Nominal Size)"]);
-                    $shopifyRateLimit();
-                    $refresh = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
-                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
-                        ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
-                    if ($refresh->successful()) {
-                        $fullProduct = $refresh->json('product');
-                    }
-                } else {
-                    $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Options update failed: " . $optResponse->body()]);
+            // Normalize values — never send empty strings to Shopify
+            $sizeValue    = !empty(trim($size ?? ''))        ? $size        : null;
+            $nominalValue = !empty(trim($nominalSize ?? '')) ? $nominalSize : null;
+            // ✅ Skip options update entirely if both values are empty
+            if (!empty($sizeValue) || !empty($nominalValue)) {
+
+
+                $currentOptions = $fullProduct['options'] ?? [];
+                $hasSize = $hasNominal = false;
+                foreach ($currentOptions as $opt) {
+                    $n = strtolower($opt['name'] ?? '');
+                    if ($n === 'size')         $hasSize    = true;
+                    if ($n === 'nominal size') $hasNominal = true;
                 }
-                $shopifyRateLimit();
+
+                if (!$hasSize || !$hasNominal) {
+                    $optResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                        ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token, 'Content-Type' => 'application/json'])
+                        ->put("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json", [
+                            'product' => [
+                                'options' => [
+                                    ['name' => 'Size',         'values' => [$size ?: $sizeValue]],
+                                    ['name' => 'Nominal Size', 'values' => [$nominalSize ?: $nominalValue]],
+                                ],
+                            ],
+                        ]);
+
+                    if ($optResponse->successful()) {
+                        $updatedFields[] = 'options';
+                        $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Options set (Size / Nominal Size)"]);
+                        $shopifyRateLimit();
+                        $refresh = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                            ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token])
+                            ->get("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}.json");
+                        if ($refresh->successful()) {
+                            $fullProduct = $refresh->json('product');
+                        }
+                    } else {
+                        $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Options update failed: " . $optResponse->body()]);
+                    }
+                    $shopifyRateLimit();
+                }
             }
 
             // ============================================================
@@ -938,26 +973,31 @@ class SettingsController extends Controller
             // Do NOT pass inventory_quantity — use inventory_levels/set instead.
             // ============================================================
 
+            $variantPayload = [
+                'sku'                  => $sku,
+                'price'                => $currentPrice,
+                'compare_at_price'     => $compareAtPrice,
+                'inventory_management' => $manageStock ? 'shopify' : null,
+                'requires_shipping'    => true,
+                'taxable'              => true,
+                'fulfillment_service'  => 'manual',
+                'grams'                => $rug['weight_grams'] ?? 0,
+            ];
+
+            // ✅ Only add option1/option2 if values actually exist
+            if (!empty($sizeValue))    $variantPayload['option1'] = $sizeValue;
+            if (!empty($nominalValue)) $variantPayload['option2'] = $nominalValue;
+
+
             $variantResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                 ->withHeaders(['X-Shopify-Access-Token' => $settings->shopify_token, 'Content-Type' => 'application/json'])
                 ->put("https://{$shopifyDomain}/admin/api/2025-07/variants/{$variantId}.json", [
-                    'variant' => [
-                        'sku'                  => $sku,
-                        'price'                => $currentPrice,
-                        'compare_at_price'     => $compareAtPrice,
-                        'option1'              => $size ?: 'Default',
-                        'option2'              => $nominalSize ?: 'Default',
-                        'inventory_management' => $manageStock ? 'shopify' : null,
-                        'requires_shipping'    => true,
-                        'taxable'              => true,
-                        'fulfillment_service'  => 'manual',
-                        'grams'                => $rug['weight_grams'] ?? 0,
-                    ],
+                    'variant' => $variantPayload,
                 ]);
 
             if ($variantResponse->successful()) {
                 $updatedFields[] = 'variant';
-                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Variant updated (price: {$currentPrice})"]);
+                $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ✓ Variant updated"]);
             } else {
                 $sendMessage(['type' => 'progress', 'progress' => $progress, 'message' => "      ⚠️ Variant update failed ({$variantResponse->status()}): " . $variantResponse->body()]);
             }
@@ -1226,6 +1266,8 @@ class SettingsController extends Controller
                     'agreedLowPrice' => 'agreed_low_price',
                     'agreedHighPrice' => 'agreed_high_price',
                     'payoutPercentage' => 'payout_percentage',
+                    'ecomPublish' => 'ecom_publish',
+                    'ecomPublishNote' => 'ecom_publish_note',
                 ] as $field => $key
             ) {
                 if (array_key_exists($field, $rug) && $rug[$field] !== null && $rug[$field] !== '') {
@@ -1483,8 +1525,7 @@ class SettingsController extends Controller
                             'Content-Type' => 'application/json',
                             'Accept' => 'application/json',
                             'Authorization' => 'Bearer ' . $token,
-                        ])
-                            ->timeout(120) // Increased timeout
+                        ])->timeout(120) // Increased timeout
                             ->connectTimeout(30)
                             ->retry(3, 2000)
                             ->get('https://plugin-api.rugsimple.com/api/rug', [
@@ -1809,25 +1850,62 @@ class SettingsController extends Controller
                     $variants = [];
 
                     // Build variants
-                    $variantData = [
-                        "option1" => $size,
-                        "option2" => $nominalSize,
-                        "price" => $currentPrice,
-                        'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
-                        'inventory_quantity' => $product['inventory']['quantityLevel'][0]['available'] ?? null,
-                        'sku' => $product['ID'] ?? '',
-                        "requires_shipping" => true,
-                        "taxable" => true,
-                        "fulfillment_service" => "manual",
-                        "grams" => $product['weight_grams'] ?? 0,
-                    ];
+                    // Build options and variant option keys dynamically
+                    $options = [];
+                    $variantOptionKeys = [];
 
-                    // Only add compare_at_price if product is on sale
+                    if (!empty(trim($size ?? ''))) {
+                        $options[] = ["name" => "Size", "values" => [$size]];
+                        $variantOptionKeys['option1'] = $size;
+                    }
+
+                    if (!empty(trim($nominalSize ?? ''))) {
+                        $options[] = ["name" => "Nominal Size", "values" => [$nominalSize]];
+                        $key = count($variantOptionKeys) === 0 ? 'option1' : 'option2';
+                        $variantOptionKeys[$key] = $nominalSize;
+                    }
+
+                    // Build variant
+                    $variantData = array_merge([
+                        "price"                => $currentPrice,
+                        'inventory_management' => ($product['inventory']['manageStock'] ?? false) ? 'shopify' : null,
+                        'inventory_quantity'   => $product['inventory']['quantityLevel'][0]['available'] ?? null,
+                        'sku'                  => $product['ID'] ?? '',
+                        "requires_shipping"    => true,
+                        "taxable"              => true,
+                        "fulfillment_service"  => "manual",
+                        "grams"                => $product['weight_grams'] ?? 0,
+                    ], $variantOptionKeys); // Merges option1/option2 only if they exist
+
                     if (!empty($sellingPrice) && !empty($regularPrice) && $sellingPrice < $regularPrice) {
                         $variantData['compare_at_price'] = $regularPrice;
                     }
 
-                    $variants[] = $variantData;
+                    $variants = [$variantData];
+
+                    // ======= EcomPublish Logic =======
+                    $ecomPublish = $product['ecomPublish'] ?? null;
+
+                    if ($ecomPublish === 'publish') {
+                        $publishStatus = 'active';
+                        $suppressPrice = false;
+                    } elseif ($ecomPublish === 'publish_without_price') {
+                        $publishStatus = 'active';
+                        $suppressPrice = true;
+                    } elseif ($ecomPublish === 'no_publish') {
+                        $publishStatus = 'draft';
+                        $suppressPrice = false;
+                    } else {
+                        $publishStatus = $product['publish_status']; // default behaviour
+                        $suppressPrice = false;
+                    }
+
+                    if ($suppressPrice) {
+                        $variantData['price'] = '0.00';
+                        unset($variantData['compare_at_price']);
+                        $variants = [$variantData]; // rebuild with suppressed price
+                    }
+                    // ======= END EcomPublish BLOCK =======
 
                     $updatedTitle = $product['title'] . ' #' . $product['ID'];
 
@@ -1843,18 +1921,27 @@ class SettingsController extends Controller
                             'vendor' => 'Oriental Rug Mart',
                             'category' => 'Home & Garden > Decor > Rug',
                             'product_type' => isset($product['constructionType']) && $product['constructionType'] !== '' ? ucfirst($product['constructionType']) : '',
-                            "options" => [
-                                ["name" => "Size", "values" => [$size]],
-                                ["name" => "Nominal Size", "values" => [$nominalSize]],
-                            ],
+                            // "options" => [
+                            //     ["name" => "Size", "values" => [$size]],
+                            //     ["name" => "Nominal Size", "values" => [$nominalSize]],
+                            // ],
+                            "options" => $options,
                             'images' => [],
                             'tags' => implode(', ', array_unique($tags)),
                             "variants"     => $variants,
                             'gift_card' => false,
                             //'status' => ($product['inventory']['quantityLevel'][0]['available'] ?? 0) <= 0 ? 'draft' : (($product['status'] ?? '') === 'available' ? 'active' : 'draft'),
-                            'status' => $product['publish_status']
+                            // 'status' => $product['publish_status'],
+                            'status'       => $publishStatus,
                         ]
                     ];
+
+                    //  $sendMessage([
+                    //     'progress' => $progress,
+                    //     'message' => json_encode($product['images']),
+                    //     'type' => 'progress',
+                    //     'success' => true
+                    // ]);
 
                     // Add the first image as the featured image
                     if (!empty($product['images'])) {
@@ -1881,6 +1968,14 @@ class SettingsController extends Controller
                             ];
                         }, $product['images'], array_keys($product['images']));
                     }
+
+                    //images
+                    // $sendMessage([
+                    //     'progress' => $progress,
+                    //     'message' => json_encode($product['images']),
+                    //     'type' => 'progress',
+                    //     'success' => true
+                    // ]);
 
                     $metafields = [
                         ['namespace' => 'custom', 'key' => 'height', 'type' => 'dimension', 'value' => json_encode(['value' => (float)($product['dimension']['height'] ?? 0), 'unit' => 'INCHES'])],
@@ -1929,7 +2024,9 @@ class SettingsController extends Controller
                         'parentId'           => 'parent_id',
                         'agreedLowPrice'     => 'agreed_low_price',
                         'agreedHighPrice'    => 'agreed_high_price',
-                        'payoutPercentage'   => 'payout_percentage'
+                        'payoutPercentage'   => 'payout_percentage',
+                        'ecomPublish' => 'ecom_publish',
+                        'ecomPublishNote' => 'ecom_publish_note',
                     ];
 
                     // Loop and merge extra metafields
@@ -2382,6 +2479,8 @@ class SettingsController extends Controller
                 'images' => $image_urls,
                 'thumbnail' => !empty($image_urls) ? $image_urls[0] : '',
                 'publish_status' => $publish_status,
+                'ecomPublish' => $product['ecomPublish'] ?? '',
+                'ecomPublishNote' => $product['ecomPublishNote'] ?? '',
             ];
         }
 

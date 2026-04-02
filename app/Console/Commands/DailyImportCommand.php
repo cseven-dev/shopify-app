@@ -47,7 +47,7 @@ class DailyImportCommand extends Command
             foreach ($shops as $shop) {
                 $this->initLog($shop->shopify_store_url);
 
-                // if ($shop->shopify_store_url == 'rugs-simple.myshopify.com') {
+                // if ($shop->shopify_store_url == '9ptn1n-6i.myshopify.com') {
                 //     $this->log("⏭️  Skipping shop: {$shop->shopify_store_url}");
                 //     continue;
                 // }
@@ -197,6 +197,10 @@ class DailyImportCommand extends Command
                     $stats['errors']++;
                     continue;
                 }
+
+                // if ($sku !== '018049') {
+                //     continue;
+                // }
 
                 try {
                     $this->log("📦 Processing SKU: {$sku}");
@@ -1626,6 +1630,8 @@ class DailyImportCommand extends Command
                     $metaKey = 'custom.' . $key;
                     $metaId = $existingMetafields[$metaKey]['id'] ?? null;
 
+                    //$this->log("🔍 Meta [{$field}] key={$metaKey} | metaId=" . ($metaId ?? 'NULL') . " | value=" . var_export($rug[$field], true));
+
                     if ($metaId && !empty($value)) {
                         $metaResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
                             ->withHeaders([
@@ -1639,8 +1645,40 @@ class DailyImportCommand extends Command
                             $metaUpdates++;
                         }
 
-                        usleep(self::RATE_LIMIT_MS);   // FIX 2: was 200000 — caused 429s
+                        usleep(self::RATE_LIMIT_MS);
+                    } elseif (!$metaId) {
+                        // Only create if value is not empty
+                        if (!empty($value)) {
+                            //$this->log("✓ Meta [{$key}] has no ID — creating");
+                            $createResponse = Http::timeout(60)->connectTimeout(30)->retry(3, 2000)
+                                ->withHeaders([
+                                    'X-Shopify-Access-Token' => $settings->shopify_token,
+                                    'Content-Type'           => 'application/json',
+                                ])->post("https://{$shopifyDomain}/admin/api/2025-07/products/{$productId}/metafields.json", [
+                                    'metafield' => [
+                                        'namespace' => 'custom',
+                                        'key'       => $key,
+                                        'type'      => 'single_line_text_field',
+                                        'value'     => $value,
+                                    ]
+                                ]);
+
+                            if ($createResponse->successful()) {
+                                $metaUpdates++;
+                                //$this->log("✓ Meta [{$key}] created");
+                            } else {
+                                $this->log("⚠️ Meta [{$key}] create failed: " . $createResponse->body());
+                            }
+
+                            usleep(self::RATE_LIMIT_MS);
+                        } else {
+                            $this->log("⏭️  Meta [{$key}] skipped — no ID and value is empty");
+                        }
                     }
+                } else {
+
+                    $this->log("⏭️  Meta [{$field}] not present in rug data — skipped");
+
                 }
             }
 
@@ -1785,7 +1823,7 @@ class DailyImportCommand extends Command
 
         foreach ($products as $product) {
 
-           // if (count($filtered) >= 5) break; // temp test stop on 5
+            // if (count($filtered) >= 5) break; // temp test stop on 5
 
             $updatedAt = $product['updated_at'] ?? null;
             if (empty($updatedAt)) continue;
